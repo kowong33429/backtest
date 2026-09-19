@@ -23,3 +23,5 @@ langchain-core>=0.2
 
 # Visualization
 plotly>=5.18
+shap>=0.44
+matplotlib>=3.8

@@ -62,13 +62,27 @@ python core/research_agent.py --symbol ZECUSDT
 
 ---
 
+## 📊 3. Data Analytics & Explainable AI (อัปเดตล่าสุด)
+
+เราได้อัปเกรดระบบการวิเคราะห์ข้อมูลให้เทียบเท่าเครื่องมือของ Quant Professional โดยเพิ่มเทคนิคเหล่านี้เข้าไปใน Pipeline อัตโนมัติ:
+
+1. **SHAP Values (Explainable AI):** ระบบจะสร้างรูปภาพ `shap_summary.png` เพื่อเปิดเผยว่าโมเดลตัดสินใจซื้อเพราะปัจจัยใดเป็นหลัก
+2. **Trade Simulation & Equity Curve:** จำลองการเทรดจริงเพื่อพล็อตกราฟการเติบโตของพอร์ต (Equity Curve) พร้อมคำนวณ Win Rate จาก Confusion Matrix
+3. **Feature Distributions:** พล็อต Boxplot เพื่อหาว่าสัญญาณซื้อที่ชนะ (Signal=1) มักจะเกิดขึ้นที่อินดิเคเตอร์ค่าเท่าไหร่
+4. **Correlation Filter & Heatmap:** พล็อตกราฟ Heatmap เพื่อเช็คความสัมพันธ์ของปัจจัยแต่ละตัว และดรอปตัวแปรที่ให้ข้อมูลซ้ำซ้อนกัน (Multicollinearity > 0.9) ทิ้งอัตโนมัติก่อนเทรน
+5. **Stability Analysis:** พล็อตกราฟเช็คความเสถียรของความแม่นยำโมเดลในแต่ละช่วงเวลา (Precision per Fold)
+
+> **💡 Note:** ข้อมูลทั้งหมดจะถูกสรุปเป็นไฟล์ `summary_report.md` เก็บไว้ในโฟลเดอร์ย่อยของแต่ละเหรียญ และแสดงผลกราฟแบบ Interactive ผ่าน Plotly ให้ดูอัตโนมัติเมื่อรันโปรแกรม
+
+---
+
 ## 🧪 ผลการรันระบบล่าสุด
 
 Agent ทำงานวนลูปหา Hyperparameter ร่วมกับ LLM ได้อย่างราบรื่น:
 
 1. ดึง Macro API 9 ตัว ครบถ้วน! (มี `USDJPY` ตามที่สั่ง)
-2. `[Executor]` รัน Parameter sweep พบสัญญาณ Buy จาก Triple Barrier อย่างแม่นยำ
-3. `[Researcher]` วนลูปให้ LLM (Gemini 3.6 Flash) ปรับเป้า `TP/SL` ให้แคบลง/กว้างขึ้นตาม Precision ที่ได้
-4. ระบบจบการทำงานและพล็อตเป้าหมายการเทรดลงกราฟ Plotly สำเร็จ
+2. `[Executor]` รัน Parameter sweep พบสัญญาณ Buy จาก Triple Barrier อย่างแม่นยำ พร้อมลบตัวแปรซ้ำซ้อนทิ้ง
+3. `[Researcher]` วนลูปให้ LLM (Gemini 3.6 Flash) ปรับเป้า `TP/SL` ให้เหมาะสม
+4. สร้างรายงานสรุปผล `summary_report.md`, ภาพ `shap_summary.png`, และกราฟแสดงผลสำเร็จ
 
-ระบบพร้อมใช้งานสำหรับทำ Quant Research บนทุกเหรียญที่คุณสนใจแล้วครับ!
+ระบบพร้อมใช้งานสำหรับทำ Quant Research & Analytics บนทุกเหรียญที่คุณสนใจแล้วครับ!
