@@ -1,4 +1,4 @@
-﻿"""
+"""
 data_loader.py — Centralized Data Fetching (100% Automated, No Hardcoding)
 """
 import os
@@ -35,6 +35,10 @@ class DataLoader:
             "BTC":    "BTC-USD",
             "USDJPY": "JPY=X",
             "GOLD":   "GC=F",
+            "US10Y":  "^TNX",
+            "US2Y":   "^IRX",
+            "OIL":    "CL=F",
+            "COPPER": "HG=F",
         }
 
         macro_df = pd.DataFrame(index=pd.date_range(start=start_date, end=end_date))
@@ -49,15 +53,37 @@ class DataLoader:
             except Exception as e:
                 print(f"  -> {name}: FAILED ({e})")
 
-        try:
-            fedfunds = web.DataReader("FEDFUNDS", "fred", start_date, end_date)
-            fedfunds.index = pd.to_datetime(fedfunds.index)
-            macro_df = macro_df.join(fedfunds, how="outer")
-            print(f"  -> FEDFUNDS: OK")
-        except Exception as e:
-            print(f"  -> FEDFUNDS: FAILED ({e})")
+        fred_tickers = {
+            "FEDFUNDS": "FEDFUNDS",
+            "M2": "M2SL",
+            "FED_BAL": "WALCL",
+            "RRP": "RRPONTSYD",
+            "INFLATION_10Y": "T10YIE",
+            "HY_SPREAD": "BAMLH0A0HYM2",
+            "CPI": "CPIAUCSL"
+        }
 
+        try:
+            fred_data = web.DataReader(list(fred_tickers.values()), "fred", start_date, end_date)
+            fred_data.index = pd.to_datetime(fred_data.index)
+            # rename columns to readable names
+            inv_map = {v: k for k, v in fred_tickers.items()}
+            fred_data.rename(columns=inv_map, inplace=True)
+            macro_df = macro_df.join(fred_data, how="outer")
+            print(f"  -> FRED Data: OK ({list(fred_tickers.keys())})")
+        except Exception as e:
+            print(f"  -> FRED Data: FAILED ({e})")
+
+        # Fill forward missing days (e.g. weekends for daily, or rest of month for monthly)
         macro_df = macro_df.ffill().fillna(0)
+
+        # Smooth out step functions from FRED data using SMA 50 and PctChange
+        for col in fred_tickers.keys():
+            if col in macro_df.columns:
+                macro_df[f"{col}_SMA50"] = macro_df[col].rolling(window=50, min_periods=1).mean()
+                # Use np.replace to handle division by zero (inf) which breaks XGBoost
+                macro_df[f"{col}_PctChg"] = macro_df[col].pct_change().replace([np.inf, -np.inf], 0).fillna(0)
+
         return macro_df
 
     def fetch_fear_greed(self, start_date, end_date):
