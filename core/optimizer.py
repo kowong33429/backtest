@@ -54,7 +54,7 @@ class QuantOptimizer:
                 max_depth=3,
                 scale_pos_weight=scale_weight,
                 random_state=42,
-                n_jobs=-1,
+                n_jobs=4,
                 verbosity=0,
             )
             model.fit(X_train, y_train)
@@ -90,7 +90,7 @@ class QuantOptimizer:
             'last_X_test': last_X_test
         }
 
-    def evaluate_params(self, tp_pct, sl_pct, max_bars=40):
+    def evaluate_params(self, tp_pct, sl_pct, max_bars=300):
         """Evaluate a single TP/SL config using TimeSeriesSplit CV for both Long and Short."""
         # 1. Generate Labels
         labeler = self.label_generator_class(

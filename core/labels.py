@@ -11,7 +11,7 @@ import numpy as np
 
 
 class LabelGenerator:
-    def __init__(self, df, window=20, tp_pct=0.03, sl_pct=0.01, max_bars=40):
+    def __init__(self, df, window=20, tp_pct=0.03, sl_pct=0.01, max_bars=300):
         self.df = df.copy()
         self.window = window
         self.tp_pct = tp_pct

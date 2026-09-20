@@ -69,8 +69,8 @@ def make_nodes(optimizer, llm):
     def researcher_node(state: AgentState):
         log.info(f"[Researcher] Iteration {state['iteration']}")
         if state['iteration'] == 0:
-            state['tp_range'] = [0.03, 0.05, 0.08]
-            state['sl_range'] = [0.01, 0.02]
+            state['tp_range'] = [0.05, 0.10, 0.15, 0.20]
+            state['sl_range'] = [0.05, 0.10, 0.15, 0.20]
             state['messages'].append(SystemMessage(content="Started research."))
         else:
             clean_results = [{'tp_pct': r['tp_pct'], 'sl_pct': r['sl_pct'], 'precision': r['precision']} for r in state['top_results']]
@@ -78,10 +78,10 @@ def make_nodes(optimizer, llm):
                 "You are a Quant Researcher. Our last hyperparameter sweep results:\n"
                 f"{clean_results}\n"
                 f"Evaluator feedback: {state['feedback']}\n\n"
-                "Propose new TP and SL values to test. "
+                "Propose new TP and SL values to test. Aim for trend following with wide TP, but KEEP SL <= 0.30 to avoid bad entry points. "
                 "Respond ONLY in this exact format (no markdown):\n"
-                "TP: 0.04, 0.06, 0.09\n"
-                "SL: 0.015, 0.025"
+                "TP: 0.15, 0.20, 0.30\n"
+                "SL: 0.10, 0.20, 0.30"
             )
             try:
                 response = llm.invoke([HumanMessage(content=prompt)])
@@ -96,8 +96,8 @@ def make_nodes(optimizer, llm):
                 log.info(f"  LLM proposed: TP={tps}, SL={sls}")
             except Exception as e:
                 log.warning(f"  LLM parse failed ({e}), using fallback grid")
-                state['tp_range'] = [0.04, 0.06, 0.10]
-                state['sl_range'] = [0.015, 0.025]
+                state['tp_range'] = [0.08, 0.12, 0.20]
+                state['sl_range'] = [0.08, 0.12, 0.20]
         return state
 
     def executor_node(state: AgentState):
@@ -121,7 +121,7 @@ def make_nodes(optimizer, llm):
             log.info("  -> Max iterations reached. Stopping.")
             state['feedback'] = "FAIL_MAX_ITER"
         else:
-            state['feedback'] = f"Precision {prec:.4f} too low. Try wider TP or tighter SL."
+            state['feedback'] = f"Precision {prec:.4f} too low. Try wider SL to give the trade more room to breathe."
             state['iteration'] += 1
         return state
 

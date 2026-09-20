@@ -11,7 +11,7 @@ class Visualizer:
         else:
             plot_df = self.df.copy()
 
-        if feature_importances is not None and not feature_importances.empty:
+        if feature_importances:
             fig = make_subplots(
                 rows=2, cols=1, 
                 shared_xaxes=False,
@@ -67,8 +67,10 @@ class Visualizer:
             ), row=1, col=1)
 
         # Feature Importance
-        if feature_importances is not None and not feature_importances.empty:
-            sorted_feats = feature_importances.sort_values(ascending=True)
+        if feature_importances:
+            import pandas as pd
+            feat_series = pd.Series(feature_importances)
+            sorted_feats = feat_series.sort_values(ascending=True)
             fig.add_trace(go.Bar(
                 x=sorted_feats.values,
                 y=sorted_feats.index,
@@ -83,7 +85,7 @@ class Visualizer:
             
         fig.update_layout(
             title=title, xaxis_rangeslider_visible=False,
-            template='plotly_dark', height=800 if (feature_importances is not None and not feature_importances.empty) else 600
+            template='plotly_dark', height=800 if feature_importances else 600
         )
         fig.show()
 
@@ -179,4 +181,27 @@ class Visualizer:
         ), row=2, col=1)
         
         fig.update_layout(title=f'Trade Analytics (Wins: {win_count}, Losses: {loss_count}, Conflicts Avoided: {conflict_count})', template='plotly_dark', height=700)
+        fig.show()
+
+    def plot_correlation_heatmap(self, feature_names):
+        """Plot Correlation Heatmap for the top features"""
+        features = [f for f in feature_names if f in self.df.columns]
+        if not features:
+            return
+            
+        corr = self.df[features].corr()
+        
+        fig = go.Figure(data=go.Heatmap(
+            z=corr.values,
+            x=corr.columns,
+            y=corr.columns,
+            colorscale='RdBu',
+            zmin=-1, zmax=1
+        ))
+        
+        fig.update_layout(
+            title='Top Features Correlation Heatmap',
+            template='plotly_dark',
+            width=800, height=800
+        )
         fig.show()
