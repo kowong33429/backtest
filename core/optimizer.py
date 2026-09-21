@@ -54,7 +54,7 @@ class QuantOptimizer:
                 max_depth=3,
                 scale_pos_weight=scale_weight,
                 random_state=42,
-                n_jobs=4,
+                n_jobs=1,
                 verbosity=0,
             )
             model.fit(X_train, y_train)

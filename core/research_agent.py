@@ -218,30 +218,64 @@ def main(symbol):
         if res_short and 'last_model' in res_short:
             save_shap_plot(res_short['last_model'], res_short['last_X_test'], "shap_short.png")
 
-        # 2. Confusion Matrix & Trade Stats
-        wins_long = sum(1 for yt, yp in zip(res_long.get('all_y_true', []), res_long.get('all_y_pred', [])) if yp == 1 and yt == 1) if res_long else 0
-        losses_long = sum(1 for yt, yp in zip(res_long.get('all_y_true', []), res_long.get('all_y_pred', [])) if yp == 1 and yt == 0) if res_long else 0
+        # 2. Add ML Predictions to feature_df for backtesting
+        labeler = LabelGenerator(feature_df, window=20, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300)
+        labeled_df = labeler.generate_labels()
         
-        wins_short = sum(1 for yt, yp in zip(res_short.get('all_y_true', []), res_short.get('all_y_pred', [])) if yp == 1 and yt == 1) if res_short else 0
-        losses_short = sum(1 for yt, yp in zip(res_short.get('all_y_true', []), res_short.get('all_y_pred', [])) if yp == 1 and yt == 0) if res_short else 0
+        if res_long and 'last_model' in res_long:
+            try:
+                model_long = res_long['last_model']
+                expected_cols = res_long['last_X_test'].columns
+                X_full = labeled_df[expected_cols]
+                labeled_df['ML_Prob_Long'] = model_long.predict_proba(X_full)[:, 1]
+            except Exception as e:
+                print(f"  [ERROR] Failed to generate ML Long predictions: {e}")
+                labeled_df['ML_Prob_Long'] = 0.0
+                
+        if res_short and 'last_model' in res_short:
+            try:
+                model_short = res_short['last_model']
+                expected_cols = res_short['last_X_test'].columns
+                X_full = labeled_df[expected_cols]
+                labeled_df['ML_Prob_Short'] = model_short.predict_proba(X_full)[:, 1]
+            except Exception as e:
+                print(f"  [ERROR] Failed to generate ML Short predictions: {e}")
+                labeled_df['ML_Prob_Short'] = 0.0
 
-        total_trades = wins_long + losses_long + wins_short + losses_short
-        wins = wins_long + wins_short
-        losses = losses_long + losses_short
-        win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
+        # 3. Run Realistic Backtester
+        from backtester import RealisticBacktester
+        backtester = RealisticBacktester(labeled_df, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300)
+        trade_log = backtester.run()
+        
+        if not trade_log.empty:
+            trade_log_path = os.path.join(base_dir, "data", symbol.lower(), "trade_log.csv")
+            trade_log.to_csv(trade_log_path, index=False)
+            print(f"  📝 บันทึกประวัติการเทรดแบบสมจริง (Trade Log) ไว้ที่: {trade_log_path}")
+            
+            total_trades = len(trade_log)
+            wins = len(trade_log[trade_log['PnL_Pct'] > 0])
+            losses = len(trade_log[trade_log['PnL_Pct'] <= 0])
+            win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
+            wins_long = len(trade_log[(trade_log['Type'] == 'Long') & (trade_log['PnL_Pct'] > 0)])
+            losses_long = len(trade_log[(trade_log['Type'] == 'Long') & (trade_log['PnL_Pct'] <= 0)])
+            wins_short = len(trade_log[(trade_log['Type'] == 'Short') & (trade_log['PnL_Pct'] > 0)])
+            losses_short = len(trade_log[(trade_log['Type'] == 'Short') & (trade_log['PnL_Pct'] <= 0)])
+        else:
+            total_trades, wins, losses, win_rate = 0, 0, 0, 0
+            wins_long, losses_long, wins_short, losses_short = 0, 0, 0, 0
 
-        # Save Summary Report to markdown file
+        # 4. Save Summary Report to markdown file
         report_path = os.path.join(base_dir, "data", symbol.lower(), "summary_report.md")
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(f"# 📊 Quant Research Report: {symbol} (Long/Short Dual Model)\n\n")
             f.write("## 1. ⚙️ การตั้งค่าที่ให้ผลลัพธ์ดีที่สุด (Best Configuration)\n")
             f.write(f"- **Take Profit (TP):** {tp_str}\n")
             f.write(f"- **Stop Loss (SL):** {sl_str}\n")
-            f.write(f"- **ความแม่นยำรวม (Precision):** {prec_str}\n\n")
-            f.write("> **💡 ความหมาย:** เมื่อโมเดลสั่งเทรด ราคาจะมีโอกาสวิ่งไปชน TP ก่อน SL ด้วยความแม่นยำประมาณ " + prec_str + "\n\n")
+            f.write(f"- **ความแม่นยำรวม (Precision ในรอบเทรน):** {prec_str}\n\n")
             
-            f.write("## 2. 📉 ผลการจำลองเทรด (Trade Simulation & Confusion Matrix)\n")
-            f.write(f"- **จำนวนไม้ทั้งหมดที่โมเดลบอกให้เทรด (Total Trades):** {total_trades} (Long: {wins_long+losses_long}, Short: {wins_short+losses_short})\n")
+            f.write("## 2. 📉 ผลการจำลองเทรดจริง (Realistic Trade Simulation)\n")
+            f.write("จำลองแบบเปิด 1 ไม้ เดินหน้าหาจุด TP/SL จริงๆ ไม่เปิดซ้อนทับกัน (No Overlapping)\n")
+            f.write(f"- **จำนวนไม้ทั้งหมด (Total Trades):** {total_trades} (Long: {wins_long+losses_long}, Short: {wins_short+losses_short})\n")
             f.write(f"- **ชนะ (Wins):** {wins}\n")
             f.write(f"- **แพ้ (Losses):** {losses}\n")
             f.write(f"- **Win Rate รวม:** {win_rate:.2f}%\n\n")
@@ -259,35 +293,13 @@ def main(symbol):
         
         print(f"\n  📝 บันทึกรายงานสรุปผลไว้ที่: {report_path}")
 
-        # Visualization calls
-        labeler = LabelGenerator(feature_df, window=20, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'])
-        labeled_df = labeler.generate_labels()
+        # 5. Visualization calls
+        vis = Visualizer(labeled_df, trade_log=trade_log if not trade_log.empty else None, symbol=symbol)
         
-        # Add ML Predictions to labeled_df for visual backtesting
-        if res_long and 'last_model' in res_long:
-            try:
-                model_long = res_long['last_model']
-                expected_cols = res_long['last_X_test'].columns
-                X_full = labeled_df[expected_cols]
-                labeled_df['ML_Prob_Long'] = model_long.predict_proba(X_full)[:, 1]
-            except Exception as e:
-                print(f"  [ERROR] Failed to generate ML Long predictions: {e}")
-                
-        if res_short and 'last_model' in res_short:
-            try:
-                model_short = res_short['last_model']
-                expected_cols = res_short['last_X_test'].columns
-                X_full = labeled_df[expected_cols]
-                labeled_df['ML_Prob_Short'] = model_short.predict_proba(X_full)[:, 1]
-            except Exception as e:
-                print(f"  [ERROR] Failed to generate ML Short predictions: {e}")
-
-        vis = Visualizer(labeled_df)
-        
+        vis.plot_results(feature_importances=top_feats, tail_bars=None)
         vis.plot_feature_distributions(list(top_feats.keys()))
         vis.plot_evaluation_metrics(res_long, res_short, cfg['tp_pct'], cfg['sl_pct'])
         vis.plot_correlation_heatmap(list(top_feats.keys()))
-        vis.plot_results(feature_importances=top_feats, tail_bars=500)
     else:
         print("  ไม่มีการตั้งค่าใดที่ให้ผลลัพธ์ผ่านเกณฑ์ (No valid configuration found).")
 
