@@ -31,10 +31,12 @@ For all feature engineering, technical indicators, macro data, and ML inference,
 - **Correlation Filter:** Drop redundant features with a correlation > 0.75.
 - **SHAP Values:** Use SHAP for final feature selection to find top drivers before rigorous hyperparameter tuning.
 
-### 5. LABELING & EXTREME CLASS IMBALANCE
-If targeting extreme trend-following (e.g., +100% TP / -20% SL):
+### 5. LABELING & EXTREME CLASS IMBALANCE (LONG & SHORT LOGIC)
+If targeting extreme trend-following (+100% TP / -20% SL):
 - Use a very wide Vertical Barrier (Time Limit, e.g., 700+ candles).
-- The dataset will be highly imbalanced (e.g., 99% Class 0, 1% Class 1). You MUST use `scale_pos_weight` in XGBoost to heavily penalize false negatives.
+- **Long Labeling:** TP = Entry + Target%, SL = Entry - Risk%.
+- **Short Labeling (Inverted):** TP = Entry - Target%, SL = Entry + Risk%.
+- The dataset will be highly imbalanced. You MUST use `scale_pos_weight` to heavily penalize false negatives.
 
 ### 6. EXIT HIERARCHY (OR-Logic Execution with Directional Logic)
 The Exit Engine must evaluate conditions in this exact priority order. Note the distinct logic for Long and Short positions:
@@ -51,7 +53,14 @@ Do not use fixed lot sizes. Calculate trade size combining Risk Management and M
 - **Risk-Based Sizing:** Risk a maximum of X% (e.g., 2%) of equity per trade. Lot Size = (Equity * Risk%) / Stop_Loss_Percentage.
 - **Probability Multiplier:** Multiply the Base Lot Size by the ML `predict_proba`. (e.g., If ML is 85% confident, scale position to 85% of the Base Lot).
 
-### 8. HUMAN-IN-THE-LOOP VISUALIZATION & VERIFIABILITY
+### 8. STRICT TIME-SERIES CROSS-VALIDATION
+- NEVER use standard Random K-Fold CV. 
+- You MUST use **Purged and Embargoed Time-Series Split (e.g., `PurgedKFold`)** during Step 4 to prevent data leakage.
+
+### 9. REALISTIC BACKTESTING (FEES & SLIPPAGE)
+- In Step 5, you MUST explicitly include realistic exchange trading fees (e.g., `0.1%` per trade) and simulated Slippage. Calculate Sharpe Ratio on Net Profit only.
+
+### 10. HUMAN-IN-THE-LOOP VISUALIZATION & VERIFIABILITY
 Every single step MUST output a clear, interactive visualization (e.g., Plotly, Seaborn) alongside statistical metrics for human sanity checking BEFORE proceeding to the next step.
 - **Step 1 (Universe):** Plot a Correlation Heatmap of the selected coins to prove they belong in the same behavioral cluster.
 - **Step 2 (Features):** Plot an Augmented Dickey-Fuller (ADF) stationarity summary table and a Feature Correlation Heatmap to verify the >0.75 drop rule.
