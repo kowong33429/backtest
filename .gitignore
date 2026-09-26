@@ -12,6 +12,7 @@ venv/
 
 # Data (too large for git)
 *.csv
+data/
 
 # IDE
 .vscode/

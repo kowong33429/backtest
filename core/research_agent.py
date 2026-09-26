@@ -219,7 +219,8 @@ def main(symbol):
             save_shap_plot(res_short['last_model'], res_short['last_X_test'], "shap_short.png")
 
         # 2. Add ML Predictions to feature_df for backtesting
-        labeler = LabelGenerator(feature_df, window=20, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300)
+        labeler = LabelGenerator(feature_df, window=20, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300,
+                                 momentum_bars=42, momentum_min_pct=0.03)
         labeled_df = labeler.generate_labels()
         
         if res_long and 'last_model' in res_long:
@@ -242,9 +243,12 @@ def main(symbol):
                 print(f"  [ERROR] Failed to generate ML Short predictions: {e}")
                 labeled_df['ML_Prob_Short'] = 0.0
 
-        # 3. Run Realistic Backtester
+        # 3. Run Realistic Backtester (ATR-based SL + Trailing Stop)
         from backtester import RealisticBacktester
-        backtester = RealisticBacktester(labeled_df, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300)
+        backtester = RealisticBacktester(
+            labeled_df, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300,
+            trail_pct=0.15, atr_sl_mult=2.0, use_trailing=True
+        )
         trade_log = backtester.run()
         
         if not trade_log.empty:

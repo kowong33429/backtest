@@ -90,11 +90,13 @@ class QuantOptimizer:
             'last_X_test': last_X_test
         }
 
-    def evaluate_params(self, tp_pct, sl_pct, max_bars=300):
+    def evaluate_params(self, tp_pct, sl_pct, max_bars=300,
+                        momentum_bars=42, momentum_min_pct=0.03):
         """Evaluate a single TP/SL config using TimeSeriesSplit CV for both Long and Short."""
-        # 1. Generate Labels
+        # 1. Generate Labels (with Momentum Filter)
         labeler = self.label_generator_class(
-            self.df, window=20, tp_pct=tp_pct, sl_pct=sl_pct, max_bars=max_bars
+            self.df, window=20, tp_pct=tp_pct, sl_pct=sl_pct, max_bars=max_bars,
+            momentum_bars=momentum_bars, momentum_min_pct=momentum_min_pct
         )
         df_labeled = labeler.generate_labels()
 

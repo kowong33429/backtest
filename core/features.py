@@ -36,6 +36,52 @@ class FeatureEngineer:
         
         return self.df
 
+    def add_trend_features(self):
+        """
+        Trend-Following Features สำหรับจับ Big Trend Move:
+        - ADX: ความแรงของเทรนด์ (>25 = strong, >40 = very strong)
+        - SMA Cross: Golden Cross / Death Cross
+        - Return 7D/30D: โมเมนตัมระยะกลาง-ยาว
+        - Dist 52W Low/High: ระยะห่างจาก Low/High 52 สัปดาห์
+        - Volume Surge: Volume spike เทียบกับค่าเฉลี่ย
+        """
+        print("Adding Trend-Following Features...")
+
+        # 1. ADX (Average Directional Index) - Trend strength
+        adx = ta.adx(self.df['High'], self.df['Low'], self.df['Close'], length=14)
+        if adx is not None and not adx.empty:
+            # ADX column is typically the first one (ADX_14)
+            self.df['ADX_14'] = adx.iloc[:, 0]
+
+        # 2. SMA Cross (Golden Cross = 1, Death Cross = 0)
+        sma50 = self.df.get('SMA_50', ta.sma(self.df['Close'], length=50))
+        sma200 = self.df.get('SMA_200', ta.sma(self.df['Close'], length=200))
+        self.df['SMA_Cross'] = (sma50 > sma200).astype(int)
+
+        # 3. Medium-term Returns (momentum over multiple timeframes)
+        # 4H timeframe: 42 bars = 7 days, 180 bars = 30 days
+        self.df['Return_7D'] = self.df['Close'].pct_change(42)
+        self.df['Return_30D'] = self.df['Close'].pct_change(180)
+
+        # 4. Distance from 52-week Low/High
+        # 52 weeks on 4H = 52 * 7 * 6 = 2184 bars, cap at available data
+        rolling_52w = min(2184, len(self.df) - 1)
+        if rolling_52w > 50:
+            low_52w = self.df['Low'].rolling(window=rolling_52w, min_periods=50).min()
+            high_52w = self.df['High'].rolling(window=rolling_52w, min_periods=50).max()
+            self.df['Dist_52W_Low'] = (self.df['Close'] - low_52w) / (low_52w + 1e-9)
+            self.df['Dist_52W_High'] = (self.df['Close'] - high_52w) / (high_52w + 1e-9)
+
+        # 5. Volume Surge (current volume / 20-period MA volume)
+        vol_ma_20 = self.df['Volume'].rolling(window=20).mean()
+        self.df['Volume_Surge'] = self.df['Volume'] / (vol_ma_20 + 1e-9)
+
+        # 6. ATR Ratio (current ATR / price, normalized volatility)
+        atr = self.df.get('ATR_14', ta.atr(self.df['High'], self.df['Low'], self.df['Close'], length=14))
+        self.df['ATR_Ratio'] = atr / (self.df['Close'] + 1e-9)
+
+        return self.df
+
     def add_lagged_features(self):
         print("Adding Lagged Features (Previous bar values)...")
         # 1. Price Returns (Rate of Change)
@@ -86,6 +132,7 @@ class FeatureEngineer:
 
     def generate_all_features(self):
         self.add_technical_indicators()
+        self.add_trend_features()
         self.add_lagged_features()
         self.add_mtf_context()
         self.add_microstructure_features()
