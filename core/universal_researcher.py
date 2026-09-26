@@ -99,7 +99,7 @@ def main():
             # 1. Generate labels for each coin separately, then concatenate
             concat_list = []
             for sym, df in all_coin_dfs.items():
-                labeler = LabelGenerator(df, window=20, tp_pct=tp, sl_pct=sl)
+                labeler = LabelGenerator(df, tp_pct=tp, sl_pct=sl)
                 df_labeled = labeler.generate_labels()
                 concat_list.append(df_labeled)
                 

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile core/features.py core/labels.py core/optimizer.py core/research_agent.py core/universal_researcher.py)",
+      "Bash(git rm *)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Bash(python -m py_compile core/labels.py core/optimizer.py core/visualizer.py core/backtester.py core/research_agent.py)",
+      "Bash(python -m py_compile core/labels.py core/optimizer.py core/visualizer.py core/backtester.py core/research_agent.py core/universal_researcher.py)"
+    ]
+  }
+}

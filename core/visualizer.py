@@ -91,22 +91,26 @@ class Visualizer:
         print(f"  📊 บันทึกกราฟ Price Action ไว้ที่: {out_path}")
 
     def plot_feature_distributions(self, feature_names):
-        """Plot Box plots for the top features, grouped by Signal"""
-        if 'Signal' not in self.df.columns:
+        """Plot Box plots for the top features, grouped by the two independent
+        binary labels (Label_Long / Label_Short). A candle can be positive for
+        both, so the Long and Short positive groups may overlap — that is
+        expected under the two-model scheme."""
+        if 'Label_Long' not in self.df.columns or 'Label_Short' not in self.df.columns:
             return
-            
+
         features = [f for f in feature_names if f in self.df.columns][:5]
         if not features:
             return
-            
+
         fig = make_subplots(rows=len(features), cols=1, subplot_titles=features)
-        
+
         for i, feat in enumerate(features, 1):
-            fig.add_trace(go.Box(y=self.df[self.df['Signal'] == 0][feat], name='Signal=0 (Noise)', marker_color='gray'), row=i, col=1)
-            fig.add_trace(go.Box(y=self.df[self.df['Signal'] == 1][feat], name='Signal=1 (Long)', marker_color='lime'), row=i, col=1)
-            fig.add_trace(go.Box(y=self.df[self.df['Signal'] == 2][feat], name='Signal=2 (Short)', marker_color='red'), row=i, col=1)
-            
-        fig.update_layout(title='Feature Distributions (Signal vs Noise)', template='plotly_dark', height=250 * len(features))
+            noise = self.df[(self.df['Label_Long'] == 0) & (self.df['Label_Short'] == 0)][feat]
+            fig.add_trace(go.Box(y=noise, name='Noise (neither)', marker_color='gray'), row=i, col=1)
+            fig.add_trace(go.Box(y=self.df[self.df['Label_Long'] == 1][feat], name='Label_Long=1', marker_color='lime'), row=i, col=1)
+            fig.add_trace(go.Box(y=self.df[self.df['Label_Short'] == 1][feat], name='Label_Short=1', marker_color='red'), row=i, col=1)
+
+        fig.update_layout(title='Feature Distributions (Long/Short positives vs Noise)', template='plotly_dark', height=250 * len(features))
         out_path = f"data/{self.symbol.lower()}/feature_dist.html"
         fig.write_html(out_path)
         print(f"  📊 บันทึกกราฟ Feature Distribution ไว้ที่: {out_path}")

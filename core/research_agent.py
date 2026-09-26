@@ -219,8 +219,7 @@ def main(symbol):
             save_shap_plot(res_short['last_model'], res_short['last_X_test'], "shap_short.png")
 
         # 2. Add ML Predictions to feature_df for backtesting
-        labeler = LabelGenerator(feature_df, window=20, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300,
-                                 momentum_bars=42, momentum_min_pct=0.03)
+        labeler = LabelGenerator(feature_df, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=700)
         labeled_df = labeler.generate_labels()
         
         if res_long and 'last_model' in res_long:
@@ -245,9 +244,16 @@ def main(symbol):
 
         # 3. Run Realistic Backtester (ATR-based SL + Trailing Stop)
         from backtester import RealisticBacktester
+        # Probability thresholds come from the optimizer's out-of-fold selection
+        # (per model), not a hardcoded cutoff — so the backtest trades on the
+        # same rule the precision was measured at.
+        thr_long = res_long.get('prob_threshold', 0.8) if res_long else 0.8
+        thr_short = res_short.get('prob_threshold', 0.8) if res_short else 0.8
+        print(f"  Entry thresholds -> Long: {thr_long:.2f}, Short: {thr_short:.2f}")
         backtester = RealisticBacktester(
             labeled_df, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300,
-            trail_pct=0.15, atr_sl_mult=2.0, use_trailing=True
+            trail_pct=0.15, atr_sl_mult=2.0, use_trailing=True,
+            long_threshold=thr_long, short_threshold=thr_short
         )
         trade_log = backtester.run()
         

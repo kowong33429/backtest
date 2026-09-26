@@ -12,7 +12,8 @@ import numpy as np
 
 class RealisticBacktester:
     def __init__(self, df, tp_pct=None, sl_pct=None, max_bars=300,
-                 trail_pct=0.15, atr_sl_mult=2.0, use_trailing=True):
+                 trail_pct=0.15, atr_sl_mult=2.0, use_trailing=True,
+                 long_threshold=0.8, short_threshold=0.8):
         """
         Parameters:
             df: DataFrame with OHLCV + ML_Prob_Long + ML_Prob_Short + ATR_14
@@ -22,6 +23,9 @@ class RealisticBacktester:
             trail_pct: Trailing Stop percentage from peak (0.15 = 15%)
             atr_sl_mult: ATR multiplier for initial Stop Loss (2.0 = 2×ATR)
             use_trailing: If True, use trailing stop instead of fixed TP
+            long_threshold: Min ML_Prob_Long to open a Long. Should come from the
+                            optimizer's out-of-fold threshold, NOT a magic number.
+            short_threshold: Min ML_Prob_Short to open a Short (from optimizer).
         """
         self.df = df.copy()
         self.tp_pct = tp_pct
@@ -30,6 +34,8 @@ class RealisticBacktester:
         self.trail_pct = trail_pct
         self.atr_sl_mult = atr_sl_mult
         self.use_trailing = use_trailing
+        self.long_threshold = long_threshold
+        self.short_threshold = short_threshold
 
     def run(self):
         trades = []
@@ -64,12 +70,20 @@ class RealisticBacktester:
 
         for i in range(n):
             if not in_position:
-                # Check for entry signals
-                is_long = prob_long[i] > 0.8
-                is_short = prob_short[i] > 0.8
+                # Check for entry signals against each model's own threshold.
+                is_long = prob_long[i] >= self.long_threshold
+                is_short = prob_short[i] >= self.short_threshold
 
                 if is_long and is_short:
-                    continue  # Conflict, do nothing
+                    # Both models fire: take the STRONGER conviction, measured as
+                    # the margin above each model's own threshold (thresholds may
+                    # differ, so compare like-for-like, not raw probabilities).
+                    long_margin = prob_long[i] - self.long_threshold
+                    short_margin = prob_short[i] - self.short_threshold
+                    if long_margin >= short_margin:
+                        is_short = False
+                    else:
+                        is_long = False
 
                 if is_long or is_short:
                     in_position = True

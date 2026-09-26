@@ -1,88 +1,115 @@
-# 🚀 Agentic Quant System (Structural & Labeling Update)
+# 🚀 Agentic Quant System (XGBoost Long/Short Pipeline)
 
-การปรับปรุงระบบทั้งหมดเสร็จสมบูรณ์ 100% แล้วครับ โดยอิงตามหลักการที่คุณแนะนำมาทั้งหมด!
-
----
-
-## 🎯 1. การแก้ไขเรื่อง "โกง Label" ให้ถูกต้อง
-
-เราได้นำแนวคิด **Hindsight Labeling (มองอนาคตเพื่อหา Label ที่ดีที่สุด)** กลับมาใช้ใน `core/labels.py` แล้วครับ 
-
-```python
-# ใน core/labels.py
-self.df['Swing_Low'] = self.df['Low'] == self.df['Low'].rolling(window=full_window, center=True).min()
-```
-
-- **ทำไมถึงดี:** การตั้ง `center=True` คือการยอมให้โมเดล "เห็นอนาคต" เพื่อมาร์คเป้าหมาย (Y) ให้แม่นยำที่สุดว่า "จุดไหนคือ Bottom ที่แท้จริง"
-- **ไม่โกงในการทายผล:** ส่วน Features (X) ที่เราใช้ป้อนให้โมเดล Machine Learning ยังคงเป็นแบบ **มองอดีตอย่างเดียว (Backward-looking)** ดังนั้น โมเดลจึงยังต้อง "เดา" อนาคตอยู่ดี ไม่มีปัญหา Data Leakage แต่อย่างใดครับ
-- **ผลลัพธ์:** Precision เพิ่มขึ้นทันที (กลับมาอยู่ที่ 5.49%) เพราะโมเดลได้เรียนรู้จากเป้าหมาย (Y) ที่ตรงเวลา ไม่ดีเลย์
+A production-oriented ML trading research pipeline for Crypto, built around the
+5-step architecture and critical rules defined in [`AGENTS.md`](./AGENTS.md).
+An LLM-driven agent (LangGraph + Gemini) sweeps the Triple-Barrier targets while
+XGBoost trains separate Long/Short entry models, and an event-driven backtester
+simulates realistic execution.
 
 ---
 
-## 📁 2. โครงสร้างโฟลเดอร์แบบ Multi-Coin
+## 🧭 Pipeline Overview (see `AGENTS.md` for the full ruleset)
 
-ผมได้ปรับโครงสร้างทั้งหมดให้รองรับการเทรดหลายๆ คู่เหรียญในอนาคตได้อย่างสวยงาม:
+| Step | Module | Timeframe | Purpose |
+|------|--------|-----------|---------|
+| 1. Universe / Scan | `trend_scanner.py`, `batch_download.py` | 1D | Find & download candidate coins |
+| 2. Feature Engineering | `features.py` | 4H | Stationary, Fibonacci/log-spaced features + macro |
+| 3. Dynamic Triple-Barrier Labeling | `labels.py` | 4H | Long/Short targets |
+| 4. Entry Models | `optimizer.py` | 4H | 2 XGBoost binary classifiers (Long & Short) |
+| 5. Exit Engine & Backtest | `backtester.py`, `visualizer.py` | 4H | ATR trailing exits + realistic simulation |
+
+The whole loop for a single symbol is orchestrated by `research_agent.py`.
+
+---
+
+## 📁 Project Structure
 
 ```text
-C:\Project\backtest\
-├── data\
-│   ├── ZECUSDT\
-│   │   ├── ZECUSDT_4h_full.csv
-│   │   └── bt_zecusdt_legacy.py
-│   └── BTCUSDT\ (ตัวอย่างในอนาคต)
-└── core\
-    ├── data_downloader.py  ← (เครื่องมือดาวน์โหลดส่วนกลาง)
-    ├── data_loader.py
-    ├── features.py
-    ├── labels.py
-    ├── optimizer.py
-    ├── visualizer.py
-    └── research_agent.py   ← (สมองหลัก)
+backtest/
+├── AGENTS.md                 # The rulebook (READ THIS FIRST)
+├── data/                     # Per-symbol OHLCV + outputs (git-ignored)
+│   └── zecusdt/
+│       └── ZECUSDT_4h_full.csv
+└── core/
+    ├── data_downloader.py    # Download OHLCV + funding from Binance
+    ├── data_loader.py        # Merge OHLCV with Macro (Yahoo/FRED) + Fear&Greed
+    ├── features.py           # Feature engineering (Fibonacci/log windows, N-1 shift)
+    ├── labels.py             # Dynamic Triple-Barrier labeling (Long/Short)
+    ├── optimizer.py          # XGBoost + PurgedKFold-style TimeSeriesSplit, corr filter
+    ├── backtester.py         # ATR SL + trailing-stop event-driven backtester
+    ├── visualizer.py         # Plotly charts (signals, SHAP, correlation, equity)
+    ├── research_agent.py     # LangGraph agent — orchestrates the full loop
+    ├── trend_scanner.py      # Multi-exchange big-trend scanner (universe candidates)
+    ├── batch_download.py     # Bulk OHLCV downloader
+    ├── batch_research.py     # Run research_agent across many coins
+    └── universal_researcher.py # Experimental cross-sectional (single global) model
 ```
 
-### ⚡ เครื่องมือดาวน์โหลดส่วนกลาง (`data_downloader.py`)
+---
 
-คุณสามารถใช้เครื่องมือนี้ดาวน์โหลดข้อมูล OHLCV ของเหรียญใดๆ บน Binance ได้เลยผ่าน Terminal โดยมันจะสร้างโฟลเดอร์ให้เองอัตโนมัติ:
+## ⚙️ Setup
 
 ```bash
-# ตัวอย่าง: ดาวน์โหลดข้อมูล ZECUSDT Timeframe 4H
-python core/data_downloader.py --symbol ZECUSDT --interval 4h
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-# ตัวอย่าง: ดาวน์โหลดข้อมูล BTCUSDT Timeframe 1D
-python core/data_downloader.py --symbol BTCUSDT --interval 1d
+# Create a .env with your keys (Gemini used by the research agent)
+echo "GEMINI_API_KEY=your_key_here" > .env
 ```
 
-### 🧠 สั่ง Agent ทำงาน
+---
 
-เมื่อมีข้อมูลแล้ว คุณสามารถสั่งให้ Agent เริ่มทำวิจัยด้วย XGBoost ทันที (พร้อมระบุเหรียญ):
+## ▶️ Usage
+
+**1. Download data** (creates `data/<symbol>/` automatically):
+
+```bash
+python core/data_downloader.py --symbol ZECUSDT --interval 4h
+```
+
+**2. Run the research agent** on a symbol:
 
 ```bash
 python core/research_agent.py --symbol ZECUSDT
 ```
 
----
+This runs the full loop: features → Dynamic Triple-Barrier labels → XGBoost
+Long/Short training (TimeSeriesSplit) → parameter sweep → realistic backtest →
+report + Plotly visualizations under `data/<symbol>/`.
 
-## 📊 3. Data Analytics & Explainable AI (อัปเดตล่าสุด)
+**Optional — batch across many coins:**
 
-เราได้อัปเกรดระบบการวิเคราะห์ข้อมูลให้เทียบเท่าเครื่องมือของ Quant Professional โดยเพิ่มเทคนิคเหล่านี้เข้าไปใน Pipeline อัตโนมัติ:
-
-1. **SHAP Values (Explainable AI):** ระบบจะสร้างรูปภาพ `shap_summary.png` เพื่อเปิดเผยว่าโมเดลตัดสินใจซื้อเพราะปัจจัยใดเป็นหลัก
-2. **Trade Simulation & Equity Curve:** จำลองการเทรดจริงเพื่อพล็อตกราฟการเติบโตของพอร์ต (Equity Curve) พร้อมคำนวณ Win Rate จาก Confusion Matrix
-3. **Feature Distributions:** พล็อต Boxplot เพื่อหาว่าสัญญาณซื้อที่ชนะ (Signal=1) มักจะเกิดขึ้นที่อินดิเคเตอร์ค่าเท่าไหร่
-4. **Correlation Filter & Heatmap:** พล็อตกราฟ Heatmap เพื่อเช็คความสัมพันธ์ของปัจจัยแต่ละตัว และดรอปตัวแปรที่ให้ข้อมูลซ้ำซ้อนกัน (Multicollinearity > 0.9) ทิ้งอัตโนมัติก่อนเทรน
-5. **Stability Analysis:** พล็อตกราฟเช็คความเสถียรของความแม่นยำโมเดลในแต่ละช่วงเวลา (Precision per Fold)
-
-> **💡 Note:** ข้อมูลทั้งหมดจะถูกสรุปเป็นไฟล์ `summary_report.md` เก็บไว้ในโฟลเดอร์ย่อยของแต่ละเหรียญ และแสดงผลกราฟแบบ Interactive ผ่าน Plotly ให้ดูอัตโนมัติเมื่อรันโปรแกรม
+```bash
+python core/trend_scanner.py            # scan for universe candidates
+python core/batch_download.py --priority
+python core/batch_research.py --priority
+```
 
 ---
 
-## 🧪 ผลการรันระบบล่าสุด
+## 📐 How the code implements the `AGENTS.md` rules
 
-Agent ทำงานวนลูปหา Hyperparameter ร่วมกับ LLM ได้อย่างราบรื่น:
+- **Rule #1 — N-1 shift:** `features.py` shifts every engineered feature by
+  `.shift(1)`; only the current bar's `Open` (the execution price) stays
+  unshifted, and it is where each labeled trade is entered.
+- **Rule #3 — Macro handling:** `data_loader.py` pulls Yahoo + FRED, forward-fills
+  only (`.ffill()`), and derives % changes / rolling stats rather than raw levels.
+- **Rule #3 — Dynamic Triple-Barrier:** `labels.py` scans **every candle**,
+  entering at that bar's `Open` and racing an upper (TP), lower (SL) and vertical
+  (time-limit, default **700 bars**) barrier. Long and Short are labeled
+  independently with inverted TP/SL. Barriers can be **ATR-scaled** (`use_atr=True`)
+  for volatility-adaptive targets.
+- **Rule #4 — Feature selection:** windows use **Fibonacci/log spacing**
+  (`8, 13, 21, 34, 55, 89, 144` and `20, 50, 100, 200`), and the optimizer drops
+  features with correlation **> 0.75**. SHAP plots rank the final drivers.
+- **Rule #5 — Class imbalance:** `optimizer.py` sets `scale_pos_weight` from the
+  positive/negative ratio for both models.
+- **Rule #6/#7 — Exit hierarchy & sizing:** `backtester.py` applies ATR-based
+  stop, break-even, and trailing-stop exits with directional Long/Short logic.
+- **Rule #8 — CV:** `optimizer.py` uses `TimeSeriesSplit` (never random K-Fold).
+- **Rule #10 — Visualization:** `visualizer.py` produces interactive Plotly charts
+  and SHAP summaries at each step for human sanity-checking.
 
-1. ดึง Macro API 9 ตัว ครบถ้วน! (มี `USDJPY` ตามที่สั่ง)
-2. `[Executor]` รัน Parameter sweep พบสัญญาณ Buy จาก Triple Barrier อย่างแม่นยำ พร้อมลบตัวแปรซ้ำซ้อนทิ้ง
-3. `[Researcher]` วนลูปให้ LLM (Gemini 3.6 Flash) ปรับเป้า `TP/SL` ให้เหมาะสม
-4. สร้างรายงานสรุปผล `summary_report.md`, ภาพ `shap_summary.png`, และกราฟแสดงผลสำเร็จ
-
-ระบบพร้อมใช้งานสำหรับทำ Quant Research & Analytics บนทุกเหรียญที่คุณสนใจแล้วครับ!
+> **Outputs** for each symbol (report `summary_report.md`, `shap_long.png`,
+> `shap_short.png`, `trade_log.csv`, and interactive charts) are written to
+> `data/<symbol>/`.

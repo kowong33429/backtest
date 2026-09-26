@@ -4,7 +4,7 @@ optimizer.py — XGBoost Hyperparameter Sweeping with TimeSeriesSplit
 กฎเหล็ก:
 - ใช้ TimeSeriesSplit เท่านั้น (ห้ามใช้ random split)
 - Feature importance ดึงจาก fold สุดท้าย ไม่ใช่ full-data fit (ป้องกัน data leakage)
-- ใช้ scale_pos_weight เพื่อรับมือกับ class imbalance (Signal=1 มีน้อยมาก)
+- ใช้ scale_pos_weight เพื่อรับมือกับ class imbalance (Label_Long/Short=1 มีน้อยมาก)
 """
 import pandas as pd
 import numpy as np
@@ -18,8 +18,9 @@ class QuantOptimizer:
         self.df = df_features
         self.label_generator_class = label_generator_class
 
-    def _drop_highly_correlated_features(self, X, threshold=0.9):
-        """Drops one of each pair of features with correlation > threshold."""
+    def _drop_highly_correlated_features(self, X, threshold=0.75):
+        """Drops one of each pair of features with correlation > threshold.
+        AGENTS.md Rule #4: drop redundant features with correlation > 0.75."""
         corr_matrix = X.corr().abs()
         upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
         to_drop = [column for column in upper.columns if any(upper[column] > threshold)]
@@ -73,6 +74,13 @@ class QuantOptimizer:
 
         avg_precision = float(np.mean(precisions)) if precisions else 0.0
 
+        # Derive the probability threshold from OUT-OF-FOLD predictions only
+        # (never the training fit). This is the threshold the backtester will
+        # trade on, so it must be chosen the same way it will be used.
+        prob_threshold, precision_at_threshold = self._best_threshold(
+            all_y_true, all_y_prob
+        )
+
         importances = None
         if last_model is not None:
             importances = pd.Series(
@@ -81,6 +89,8 @@ class QuantOptimizer:
 
         return {
             'avg_precision': avg_precision,
+            'prob_threshold': prob_threshold,
+            'precision_at_threshold': precision_at_threshold,
             'importances': importances,
             'fold_precisions': precisions,
             'all_y_true': all_y_true,
@@ -90,27 +100,52 @@ class QuantOptimizer:
             'last_X_test': last_X_test
         }
 
-    def evaluate_params(self, tp_pct, sl_pct, max_bars=300,
-                        momentum_bars=42, momentum_min_pct=0.03):
+    def _best_threshold(self, y_true, y_prob, min_signals=10):
+        """Pick the probability cutoff that MAXIMIZES precision on the pooled
+        out-of-fold predictions, while still firing at least `min_signals`
+        trades (so we don't 'win' by taking a single lucky signal).
+
+        Returns (threshold, precision_at_threshold). Falls back to (0.5, 0.0)
+        when there are too few positives to choose meaningfully.
+        """
+        y_true = np.asarray(y_true, dtype=float)
+        y_prob = np.asarray(y_prob, dtype=float)
+        if y_true.size == 0:
+            return 0.5, 0.0
+
+        best_t, best_prec = 0.5, 0.0
+        found = False
+        for t in np.arange(0.30, 0.951, 0.01):
+            selected = y_prob >= t
+            n_sel = int(selected.sum())
+            if n_sel < min_signals:
+                continue
+            prec = float(y_true[selected].mean())  # TP / predicted-positives
+            if prec >= best_prec:
+                best_prec, best_t = prec, float(t)
+                found = True
+        return (best_t, best_prec) if found else (0.5, 0.0)
+
+    def evaluate_params(self, tp_pct, sl_pct, max_bars=700, use_atr=False):
         """Evaluate a single TP/SL config using TimeSeriesSplit CV for both Long and Short."""
-        # 1. Generate Labels (with Momentum Filter)
+        # 1. Generate Labels (Dynamic Triple-Barrier)
         labeler = self.label_generator_class(
-            self.df, window=20, tp_pct=tp_pct, sl_pct=sl_pct, max_bars=max_bars,
-            momentum_bars=momentum_bars, momentum_min_pct=momentum_min_pct
+            self.df, tp_pct=tp_pct, sl_pct=sl_pct, max_bars=max_bars, use_atr=use_atr
         )
         df_labeled = labeler.generate_labels()
 
         # 2. Prepare X and y
-        drop_cols = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Signal']
+        drop_cols = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume',
+                     'Label_Long', 'Label_Short']
         df_numeric = df_labeled.select_dtypes(include=[np.number])
         X = df_numeric.drop(columns=[c for c in drop_cols if c in df_numeric.columns])
-        
-        # Correlation Filter
-        X = self._drop_highly_correlated_features(X, threshold=0.9)
 
-        # 3. Create independent labels
-        y_long = (df_labeled['Signal'] == 1).astype(int)
-        y_short = (df_labeled['Signal'] == 2).astype(int)
+        # Correlation Filter (AGENTS.md Rule #4: drop > 0.75)
+        X = self._drop_highly_correlated_features(X, threshold=0.75)
+
+        # 3. Independent binary targets (two separate models — AGENTS.md Step 4)
+        y_long = df_labeled['Label_Long'].astype(int)
+        y_short = df_labeled['Label_Short'].astype(int)
         
         tscv = TimeSeriesSplit(n_splits=3)
         
@@ -136,6 +171,8 @@ class QuantOptimizer:
             'avg_precision': combined_prec,
             'prec_long': prec_long,
             'prec_short': prec_short,
+            'thr_long': res_long['prob_threshold'] if res_long else 0.5,
+            'thr_short': res_short['prob_threshold'] if res_short else 0.5,
             'importances': combined_imp,
             'res_long': res_long,
             'res_short': res_short
@@ -161,6 +198,8 @@ class QuantOptimizer:
                     'precision': prec,
                     'prec_long': res['prec_long'],
                     'prec_short': res['prec_short'],
+                    'thr_long': res['thr_long'],
+                    'thr_short': res['thr_short'],
                     'top_features': importances.head(10).to_dict() if not importances.empty else {},
                     'res_long': res['res_long'],
                     'res_short': res['res_short']
