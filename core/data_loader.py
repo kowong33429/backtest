@@ -148,6 +148,9 @@ class DataLoader:
 
     def get_full_data(self):
         df = self.load_base_data()
+        # merge_asof requires identical datetime resolution on both keys. Sources
+        # arrive with mixed units (us / s), so normalize every key to ns.
+        df['Date'] = pd.to_datetime(df['Date']).astype('datetime64[ns]')
         start_date = df['Date'].min().strftime("%Y-%m-%d")
         end_date = df['Date'].max().strftime("%Y-%m-%d")
 
@@ -155,19 +158,19 @@ class DataLoader:
         if macro_df is not None:
             macro_df.index.name = 'Date'
             macro_reset = macro_df.reset_index()
-            macro_reset['Date'] = pd.to_datetime(macro_reset['Date'])
+            macro_reset['Date'] = pd.to_datetime(macro_reset['Date']).astype('datetime64[ns]')
             df = pd.merge_asof(df, macro_reset, on='Date', direction='backward')
 
         fg_df = self.fetch_fear_greed(start_date, end_date)
         if fg_df is not None:
             fg_reset = fg_df.reset_index()
-            fg_reset['Date'] = pd.to_datetime(fg_reset['Date'])
+            fg_reset['Date'] = pd.to_datetime(fg_reset['Date']).astype('datetime64[ns]')
             df = pd.merge_asof(df, fg_reset, on='Date', direction='backward')
 
         fr_df = self.fetch_funding_rate(start_date, end_date)
         if fr_df is not None:
             fr_reset = fr_df.reset_index()
-            fr_reset['Date'] = pd.to_datetime(fr_reset['Date'])
+            fr_reset['Date'] = pd.to_datetime(fr_reset['Date']).astype('datetime64[ns]')
             df = pd.merge_asof(df, fr_reset, on='Date', direction='backward')
 
         df = df.ffill().fillna(0)

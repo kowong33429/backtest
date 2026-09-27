@@ -144,6 +144,131 @@ def build_graph(optimizer, llm):
     g.add_conditional_edges("evaluator", routing_logic)
     return g.compile()
 
+# Known big-move windows the strategy should ideally catch (OOS sanity check).
+# NOTE: this is a READ-ONLY diagnostic. We do NOT retrain to fit these windows —
+# that would be curve-fitting to known outcomes. It only reports whether the
+# walk-forward backtest happened to trade inside them.
+TARGET_WINDOWS = [
+    ("2024-07-09", "2024-08-24"),
+    ("2024-10-14", "2024-12-08"),
+    ("2025-09-06", "2025-11-16"),
+    ("2026-03-31", "2026-05-24"),
+    ("2026-08-17", None),  # open / ongoing
+]
+
+
+def _net_sharpe(trade_log):
+    """Annualized Sharpe on NET per-trade returns (Rule #9: Sharpe on net profit
+    only). Uses Net_Return when present, else gross PnL_Pct. Scales the per-trade
+    Sharpe by sqrt(trades per year) inferred from the actual date span.
+    Returns 0.0 if there are too few trades or zero dispersion."""
+    import numpy as np
+    import pandas as pd
+    if trade_log is None or trade_log.empty:
+        return 0.0
+    col = 'Net_Return' if 'Net_Return' in trade_log.columns else 'PnL_Pct'
+    r = np.asarray(trade_log[col], dtype=float)
+    if r.size < 2 or r.std(ddof=1) == 0:
+        return 0.0
+    entry = pd.to_datetime(trade_log['Entry_Date'])
+    exit_ = pd.to_datetime(trade_log['Exit_Date'])
+    span_days = max((exit_.max() - entry.min()).days, 1)
+    trades_per_year = len(r) / (span_days / 365.25)
+    return float(r.mean() / r.std(ddof=1) * np.sqrt(max(trades_per_year, 1e-9)))
+
+
+def run_exit_sweep(labeled_df, thr_long, thr_short, stagnation_bars,
+                   stagnation_min_profit_pct, cfg,
+                   trail_grid=(0.10, 0.15, 0.20, 0.25, 0.30),
+                   atr_grid=(1.5, 2.0, 2.5, 3.0)):
+    """Sweep the two exit knobs (trailing-stop % × ATR SL multiplier) and record
+    the NET Sharpe of each combo (AGENTS.md Rule #10 Step 5 stability heatmap).
+
+    This is a robustness diagnostic ONLY — the main run keeps its default exit
+    params. We do NOT auto-adopt the best cell: a single spiky cell that beats a
+    smooth neighborhood is over-fit, and the heatmap is there to show the human
+    whether the good region is a plateau or a lucky pixel."""
+    import pandas as pd
+    from backtester import RealisticBacktester
+    rows = []
+    print(f"  [Sweep] Exit-parameter stability: {len(trail_grid)}×{len(atr_grid)} combos ...")
+    for trail in trail_grid:
+        for atr_mult in atr_grid:
+            bt = RealisticBacktester(
+                labeled_df, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300,
+                trail_pct=trail, atr_sl_mult=atr_mult, use_trailing=True,
+                long_threshold=thr_long, short_threshold=thr_short,
+                stagnation_bars=stagnation_bars,
+                stagnation_min_profit_pct=stagnation_min_profit_pct,
+            )
+            tl = bt.run()
+            sharpe = _net_sharpe(tl)
+            net_ret = float(tl['Net_Return'].sum()) if (not tl.empty and 'Net_Return' in tl.columns) else 0.0
+            rows.append({'trail_pct': trail, 'atr_sl_mult': atr_mult,
+                         'sharpe': sharpe, 'net_return': net_ret, 'n_trades': len(tl)})
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        best = df.loc[df['sharpe'].idxmax()]
+        print(f"  [Sweep] Best cell (diagnostic only): trail={best['trail_pct']}, "
+              f"atr={best['atr_sl_mult']}, Sharpe={best['sharpe']:.2f} | "
+              f"default trail=0.15/atr=2.0 kept for the main run.")
+    return df
+
+
+def build_validation_report(trade_log):
+    """Return a markdown string with (a) per-year PnL/win-rate (regime view) and
+    (b) whether trades overlap the known TARGET_WINDOWS. Prints a summary too."""
+    import pandas as pd
+    lines = ["## 5. 🔬 Walk-Forward Validation (Regime & Target Windows)\n"]
+
+    if trade_log is None or trade_log.empty:
+        lines.append("_No trades to validate._\n")
+        print("  [Validation] No trades.")
+        return "\n".join(lines)
+
+    tl = trade_log.copy()
+    tl['Entry_Date'] = pd.to_datetime(tl['Entry_Date'])
+    tl['Exit_Date'] = pd.to_datetime(tl['Exit_Date'])
+
+    # Prefer the NET return (Kelly-sized, after fees/slippage — Rule #7 & #9)
+    # when the backtester provides it; otherwise fall back to raw gross PnL_Pct.
+    ret_col = 'Net_Return' if 'Net_Return' in tl.columns else 'PnL_Pct'
+    ret_label = "Net Return" if ret_col == 'Net_Return' else "Gross PnL"
+    print(f"  [Validation] Using '{ret_col}' as the return column.")
+
+    # (a) Per-year breakdown — exposes regime dependence (e.g. strong 2021-22,
+    #     weak 2023-25) without cropping the training data.
+    lines.append("### Per-Year Performance\n")
+    lines.append(f"| Year | Trades | Win Rate | {ret_label} % (sum) |")
+    lines.append("|------|--------|----------|-----------------|")
+    tl['Year'] = tl['Entry_Date'].dt.year
+    print("  [Validation] Per-year performance:")
+    for year, grp in tl.groupby('Year'):
+        n = len(grp)
+        wr = (grp[ret_col] > 0).mean() * 100
+        net = grp[ret_col].sum() * 100
+        lines.append(f"| {year} | {n} | {wr:.1f}% | {net:+.1f}% |")
+        print(f"    {year}: {n} trades, win {wr:.1f}%, {ret_label.lower()} {net:+.1f}%")
+
+    # (b) Target-window overlap — did the walk-forward model catch the big moves?
+    lines.append("\n### Target-Window Coverage (did we catch the big moves?)\n")
+    lines.append("| Window | Trades inside | Net PnL % |")
+    lines.append("|--------|---------------|-----------|")
+    print("  [Validation] Target-window coverage:")
+    for start, end in TARGET_WINDOWS:
+        w_start = pd.Timestamp(start)
+        w_end = pd.Timestamp(end) if end else tl['Exit_Date'].max()
+        # A trade overlaps the window if entry<=w_end and exit>=w_start.
+        inside = tl[(tl['Entry_Date'] <= w_end) & (tl['Exit_Date'] >= w_start)]
+        net = inside[ret_col].sum() * 100
+        label = f"{start} → {end or 'open'}"
+        hit = "✅" if len(inside) > 0 else "❌"
+        lines.append(f"| {label} | {hit} {len(inside)} | {net:+.1f}% |")
+        print(f"    {label}: {hit} {len(inside)} trades, net {net:+.1f}%")
+
+    return "\n".join(lines)
+
+
 def main(symbol):
     print("=" * 50)
     print(f" Agentic Quant Research System - {symbol}")
@@ -218,29 +343,31 @@ def main(symbol):
         if res_short and 'last_model' in res_short:
             save_shap_plot(res_short['last_model'], res_short['last_X_test'], "shap_short.png")
 
-        # 2. Add ML Predictions to feature_df for backtesting
+        # 2. Add ML Predictions to feature_df for backtesting.
+        # Use WALK-FORWARD OUT-OF-FOLD probabilities (AGENTS.md Rule #8): each bar
+        # is scored only by a fold-model that never trained on it, so the backtest
+        # contains no in-sample leakage. The OOF array is aligned to feature_df's
+        # row positions (labels.generate_labels adds columns without reindexing).
+        # The initial training block has no OOF prediction (NaN -> 0 -> no trade),
+        # which is the expected walk-forward warm-up.
+        import numpy as np
         labeler = LabelGenerator(feature_df, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=700)
         labeled_df = labeler.generate_labels()
-        
-        if res_long and 'last_model' in res_long:
-            try:
-                model_long = res_long['last_model']
-                expected_cols = res_long['last_X_test'].columns
-                X_full = labeled_df[expected_cols]
-                labeled_df['ML_Prob_Long'] = model_long.predict_proba(X_full)[:, 1]
-            except Exception as e:
-                print(f"  [ERROR] Failed to generate ML Long predictions: {e}")
-                labeled_df['ML_Prob_Long'] = 0.0
-                
-        if res_short and 'last_model' in res_short:
-            try:
-                model_short = res_short['last_model']
-                expected_cols = res_short['last_X_test'].columns
-                X_full = labeled_df[expected_cols]
-                labeled_df['ML_Prob_Short'] = model_short.predict_proba(X_full)[:, 1]
-            except Exception as e:
-                print(f"  [ERROR] Failed to generate ML Short predictions: {e}")
-                labeled_df['ML_Prob_Short'] = 0.0
+
+        def _attach_oof(res, col):
+            if res and res.get('oof_prob') is not None:
+                oof = np.asarray(res['oof_prob'], dtype=float)
+                if len(oof) == len(labeled_df):
+                    labeled_df[col] = np.nan_to_num(oof, nan=0.0)
+                    covered = int(np.isfinite(oof).sum())
+                    print(f"  [OOF] {col}: {covered}/{len(oof)} bars scored out-of-fold "
+                          f"({covered/len(oof)*100:.0f}% coverage, rest = warm-up).")
+                    return
+                print(f"  [WARN] OOF length {len(oof)} != df {len(labeled_df)} for {col}; using 0.")
+            labeled_df[col] = 0.0
+
+        _attach_oof(res_long, 'ML_Prob_Long')
+        _attach_oof(res_short, 'ML_Prob_Short')
 
         # 3. Run Realistic Backtester (ATR-based SL + Trailing Stop)
         from backtester import RealisticBacktester
@@ -250,10 +377,19 @@ def main(symbol):
         thr_long = res_long.get('prob_threshold', 0.8) if res_long else 0.8
         thr_short = res_short.get('prob_threshold', 0.8) if res_short else 0.8
         print(f"  Entry thresholds -> Long: {thr_long:.2f}, Short: {thr_short:.2f}")
+
+        # --- Exit config (AGENTS.md Rule #6, two layers) ---
+        #   Layer 1: ATR trailing stop (always on via use_trailing).
+        #   Layer 2: "price not moving" — close if the trade has not reached
+        #            profit within STAGNATION_BARS (7 days on 4H = 42 bars).
+        STAGNATION_BARS = 42            # 7 days on the 4H timeframe
+        STAGNATION_MIN_PROFIT_PCT = 0.0  # any profit by then keeps it open
         backtester = RealisticBacktester(
             labeled_df, tp_pct=cfg['tp_pct'], sl_pct=cfg['sl_pct'], max_bars=300,
             trail_pct=0.15, atr_sl_mult=2.0, use_trailing=True,
-            long_threshold=thr_long, short_threshold=thr_short
+            long_threshold=thr_long, short_threshold=thr_short,
+            stagnation_bars=STAGNATION_BARS,
+            stagnation_min_profit_pct=STAGNATION_MIN_PROFIT_PCT
         )
         trade_log = backtester.run()
         
@@ -270,9 +406,18 @@ def main(symbol):
             losses_long = len(trade_log[(trade_log['Type'] == 'Long') & (trade_log['PnL_Pct'] <= 0)])
             wins_short = len(trade_log[(trade_log['Type'] == 'Short') & (trade_log['PnL_Pct'] > 0)])
             losses_short = len(trade_log[(trade_log['Type'] == 'Short') & (trade_log['PnL_Pct'] <= 0)])
+
+            # Net performance (Kelly-sized, after fees/slippage — Rule #7 & #9)
+            if 'Equity' in trade_log.columns and 'Net_Return' in trade_log.columns:
+                final_equity = float(trade_log['Equity'].iloc[-1])
+                net_total_return = (final_equity / 10000.0 - 1.0) * 100
+            else:
+                final_equity, net_total_return = 10000.0, 0.0
+            net_sharpe = _net_sharpe(trade_log)
         else:
             total_trades, wins, losses, win_rate = 0, 0, 0, 0
             wins_long, losses_long, wins_short, losses_short = 0, 0, 0, 0
+            final_equity, net_total_return, net_sharpe = 10000.0, 0.0, 0.0
 
         # 4. Save Summary Report to markdown file
         report_path = os.path.join(base_dir, "data", symbol.lower(), "summary_report.md")
@@ -288,7 +433,12 @@ def main(symbol):
             f.write(f"- **จำนวนไม้ทั้งหมด (Total Trades):** {total_trades} (Long: {wins_long+losses_long}, Short: {wins_short+losses_short})\n")
             f.write(f"- **ชนะ (Wins):** {wins}\n")
             f.write(f"- **แพ้ (Losses):** {losses}\n")
-            f.write(f"- **Win Rate รวม:** {win_rate:.2f}%\n\n")
+            f.write(f"- **Win Rate รวม:** {win_rate:.2f}%\n")
+            f.write("\n### 💰 ผลตอบแทนสุทธิ (Net — Kelly-sized, หักค่าธรรมเนียม/Slippage แล้ว | Rule #7 & #9)\n")
+            f.write(f"- **เงินทุนเริ่มต้น (Initial Equity):** ${10000:,.0f}\n")
+            f.write(f"- **เงินทุนสุดท้าย (Final Equity):** ${final_equity:,.0f}\n")
+            f.write(f"- **ผลตอบแทนสุทธิรวม (Net Total Return):** {net_total_return:+.1f}%\n")
+            f.write(f"- **Sharpe Ratio (annualized, net):** {net_sharpe:.2f}\n\n")
             
             f.write("## 3. 🧠 SHAP Values (Explainable AI)\n")
             f.write("วิเคราะห์ว่า Feature แต่ละตัวส่งผลอย่างไรต่อการตัดสินใจของโมเดล (จุดสีแดง = ค่าสูง, จุดสีน้ำเงิน = ค่าต่ำ)\n\n")
@@ -300,7 +450,10 @@ def main(symbol):
             f.write("## 4. 🔍 ปัจจัยที่มีผลต่อการตัดสินใจมากที่สุด (Top Feature Importances)\n")
             for i, (feat, score) in enumerate(top_feats.items(), 1):
                 f.write(f"{i}. **{feat}** (Score: {score:.4f})\n")
-        
+
+            # Walk-forward validation: per-year regime view + target-window coverage
+            f.write("\n" + build_validation_report(trade_log) + "\n")
+
         print(f"\n  📝 บันทึกรายงานสรุปผลไว้ที่: {report_path}")
 
         # 5. Visualization calls
@@ -310,6 +463,18 @@ def main(symbol):
         vis.plot_feature_distributions(list(top_feats.keys()))
         vis.plot_evaluation_metrics(res_long, res_short, cfg['tp_pct'], cfg['sl_pct'])
         vis.plot_correlation_heatmap(list(top_feats.keys()))
+
+        # 6. Exit-parameter stability sweep + 2D heatmap (Rule #10 Step 5).
+        #    Diagnostic only — the main backtest above keeps the default exit
+        #    params; this shows whether good performance is a robust plateau.
+        if not trade_log.empty:
+            sweep_df = run_exit_sweep(
+                labeled_df, thr_long, thr_short,
+                STAGNATION_BARS, STAGNATION_MIN_PROFIT_PCT, cfg)
+            sweep_path = os.path.join(base_dir, "data", symbol.lower(), "exit_sweep.csv")
+            sweep_df.to_csv(sweep_path, index=False)
+            print(f"  📝 บันทึกผล Exit-Parameter Sweep ไว้ที่: {sweep_path}")
+            vis.plot_param_stability(sweep_df)
     else:
         print("  ไม่มีการตั้งค่าใดที่ให้ผลลัพธ์ผ่านเกณฑ์ (No valid configuration found).")
 

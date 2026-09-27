@@ -27,7 +27,7 @@ For all feature engineering, technical indicators, macro data, and ML inference,
 - **Merging & Filling:** When merging monthly FRED data with daily Crypto data, ALWAYS apply the publication lag shift FIRST, and then strictly use `.ffill()` (Forward-Fill). NEVER use `.bfill()` or any interpolation.
 
 ### 4. FEATURE SELECTION PIPELINE
-- Do not use dense lookback windows (e.g., avoid 20, 21, 22...). Use logarithmic/Fibonacci spacing (e.g., 20, 50, 100, 200).
+- Do not use dense lookback windows (e.g., avoid 20, 21, 22...). Use steps of 10.
 - **Correlation Filter:** Drop redundant features with a correlation > 0.75.
 - **SHAP Values:** Use SHAP for final feature selection to find top drivers before rigorous hyperparameter tuning.
 
@@ -40,13 +40,11 @@ If targeting extreme trend-following (+100% TP / -20% SL):
 
 ### 6. EXIT HIERARCHY (OR-Logic Execution with Directional Logic)
 The Exit Engine must evaluate conditions in this exact priority order. Note the distinct logic for Long and Short positions:
-1. **Survival (Macro/Regime Filter - Global):** If VIX > Threshold or extreme ATR spike occurs -> Close ALL positions immediately regardless of direction (Market Panic).
-2. **Hard Risk (Price/Trailing Stop):** 
+1. **Hard Risk (Price/Trailing Stop):** 
    - **For Long:** If current price drops BELOW the ATR-based Trailing Stop (e.g., Highest Price since entry - `X * ATR`) -> Close Long immediately.
    - **For Short:** If current price rises ABOVE the ATR-based Trailing Stop (e.g., Lowest Price since entry + `X * ATR`) -> Close Short immediately.
-3. **Smart Exit (Signal Decay):**
-   - **For Long:** If the **Long** Entry Model's `predict_proba` drops below a certain threshold (e.g., < 0.50) -> Close Long (Edge Lost).
-   - **For Short:** If the **Short** Entry Model's `predict_proba` drops below a certain threshold (e.g., < 0.50) -> Close Short (Edge Lost).
+2. **Price not move (too stable):**
+   - If the price not change enough to make profit within 7 days, close the order.
    
 ### 7. DYNAMIC POSITION SIZING (Fractional Kelly)
 Do not use fixed lot sizes. Calculate trade size combining Risk Management and ML Confidence:

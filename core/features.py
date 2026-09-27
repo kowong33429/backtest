@@ -3,24 +3,26 @@ import numpy as np
 import pandas_ta as ta
 
 # ---------------------------------------------------------------------------
-# AGENTS.md Rule #4 — FEATURE SELECTION PIPELINE
-# Do NOT use dense lookback windows (20, 21, 22, ...).
-# Use logarithmic / Fibonacci spacing so each window carries distinct
-# information. The correlation filter (>0.75) later drops any that end up
-# redundant.
+# FEATURE WINDOWS
+# NOTE: Per an explicit user override, indicator windows are stepped by 10
+# (10, 20, 30, ...). This deliberately departs from AGENTS.md Rule #4
+# (Fibonacci/log spacing). Adjacent windows are highly correlated, so the
+# >0.75 correlation filter in optimizer.py is expected to prune most of the
+# redundant ones downstream.
 # ---------------------------------------------------------------------------
-FIB_LENGTHS = [8, 13, 21, 34, 55, 89, 144]   # Fibonacci-spaced (bars on 4H)
-LOG_LENGTHS = [20, 50, 100, 200]             # Log-spaced trend windows
+RSI_LENGTHS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+BB_LENGTHS = [20, 30, 40, 50, 60, 70, 80, 90, 100]           # BB_20 = canonical baseline
+VOL_SURGE_LENGTHS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+ADX_LENGTHS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+ATR_LENGTHS = [10, 14, 20, 30, 40, 50, 60, 70, 80, 90, 100]  # keep 14 (backtester + ATR_Ratio)
+SMA_LENGTHS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 200] # keep 50 & 200 (SMA_Cross)
 
-RSI_LENGTHS = [8, 21, 55]                    # Fibonacci momentum
-SMA_LENGTHS = [20, 50, 100, 200]             # Log trend (keeps SMA_50 / SMA_200)
-ATR_LENGTHS = [14, 34]                       # keeps ATR_14 for the backtester
-ADX_LENGTHS = [14, 34]
-BB_LENGTHS = [20, 55]
-RETURN_LENGTHS = [5, 13, 34, 89, 144]        # multi-horizon momentum
-VOL_SURGE_LENGTHS = [21, 55]
-POS_RANGE_LENGTHS = [6, 42, 89]              # 24H / 7D / ~15D rolling position
-VWAP_LENGTHS = [6, 42]                        # 24H / 7D rolling VWAP distance
+# Time-based windows expressed in 4H bars:
+#   1D=6, 3D=18, 7D=42, 15D=90, 1M=180, 3M=540, 6M=1080, 12M=2190
+RETURN_LENGTHS = [6, 18, 42, 90, 180, 540, 1080, 2190]       # % change vs past
+POS_RANGE_LENGTHS = [6, 18, 42, 90, 180, 540, 1080, 2190]    # position within rolling range
+VWAP_LENGTHS = [6, 18, 42, 90, 180, 540, 1080, 2190]         # distance from rolling VWAP
+DIST_HL_LENGTHS = [180, 540, 1080, 2190]                     # distance from 1M/3M/6M/1Y High & Low
 
 
 class FeatureEngineer:
@@ -28,9 +30,9 @@ class FeatureEngineer:
         self.df = df.copy()
 
     def add_technical_indicators(self):
-        print("Adding Technical Indicators (Fibonacci/Log-spaced)...")
+        print("Adding Technical Indicators (stepped windows)...")
 
-        # --- Momentum: RSI across Fibonacci lengths ---
+        # --- Momentum: RSI across lengths ---
         for length in RSI_LENGTHS:
             self.df[f'RSI_{length}'] = ta.rsi(self.df['Close'], length=length)
 
@@ -40,7 +42,7 @@ class FeatureEngineer:
             self.df['MACD'] = macd.iloc[:, 0]
             self.df['MACD_Hist'] = macd.iloc[:, 1]
 
-        # --- Volatility: Bollinger Band width across log/fib windows ---
+        # --- Volatility: Bollinger Band width across windows ---
         for length in BB_LENGTHS:
             sma = self.df['Close'].rolling(window=length).mean()
             std = self.df['Close'].rolling(window=length).std()
@@ -52,7 +54,7 @@ class FeatureEngineer:
                 self.df['High'], self.df['Low'], self.df['Close'], length=length
             )
 
-        # --- Trend: SMA across log windows + distance from each ---
+        # --- Trend: SMA across windows + distance from each ---
         for length in SMA_LENGTHS:
             sma = ta.sma(self.df['Close'], length=length)
             self.df[f'SMA_{length}'] = sma
@@ -65,9 +67,9 @@ class FeatureEngineer:
         Trend-Following Features for catching big trend moves:
         - ADX: trend strength across multiple lengths
         - SMA Cross: Golden / Death Cross (50 vs 200)
-        - Multi-horizon returns (Fibonacci-spaced)
-        - Distance from 52-week Low/High
-        - Volume Surge across Fibonacci windows
+        - Multi-horizon returns (time-based windows)
+        - Distance from multi-timeframe (1M/3M/6M/1Y) Low/High
+        - Volume Surge across windows
         - ATR Ratio (normalized volatility)
         """
         print("Adding Trend-Following Features...")
@@ -83,20 +85,22 @@ class FeatureEngineer:
         sma200 = self.df.get('SMA_200', ta.sma(self.df['Close'], length=200))
         self.df['SMA_Cross'] = (sma50 > sma200).astype(int)
 
-        # 3. Multi-horizon returns (Fibonacci-spaced bars)
+        # 3. Multi-horizon returns (time-based bars)
         for length in RETURN_LENGTHS:
             self.df[f'Return_{length}b'] = self.df['Close'].pct_change(length)
 
-        # 4. Distance from 52-week Low/High
-        # 52 weeks on 4H = 52 * 7 * 6 = 2184 bars, cap at available data
-        rolling_52w = min(2184, len(self.df) - 1)
-        if rolling_52w > 50:
-            low_52w = self.df['Low'].rolling(window=rolling_52w, min_periods=50).min()
-            high_52w = self.df['High'].rolling(window=rolling_52w, min_periods=50).max()
-            self.df['Dist_52W_Low'] = (self.df['Close'] - low_52w) / (low_52w + 1e-9)
-            self.df['Dist_52W_High'] = (self.df['Close'] - high_52w) / (high_52w + 1e-9)
+        # 4. Distance from multi-timeframe Low/High (1M/3M/6M/1Y)
+        n = len(self.df)
+        for length in DIST_HL_LENGTHS:
+            window = min(length, n - 1)
+            if window <= 50:
+                continue
+            roll_low = self.df['Low'].rolling(window=window, min_periods=50).min()
+            roll_high = self.df['High'].rolling(window=window, min_periods=50).max()
+            self.df[f'Dist_Low_{length}b'] = (self.df['Close'] - roll_low) / (roll_low + 1e-9)
+            self.df[f'Dist_High_{length}b'] = (self.df['Close'] - roll_high) / (roll_high + 1e-9)
 
-        # 5. Volume Surge across Fibonacci windows
+        # 5. Volume Surge across windows (current volume vs rolling average)
         for length in VOL_SURGE_LENGTHS:
             vol_ma = self.df['Volume'].rolling(window=length).mean()
             self.df[f'Volume_Surge_{length}'] = self.df['Volume'] / (vol_ma + 1e-9)
@@ -109,13 +113,13 @@ class FeatureEngineer:
 
     def add_lagged_features(self):
         print("Adding Lagged Features (Previous bar values)...")
-        # 1. Price Returns (Rate of Change) at short Fibonacci lags
+        # 1. Price Returns (Rate of Change) at short lags
         self.df['Return_1'] = self.df['Close'].pct_change(1)
         self.df['Return_2'] = self.df['Close'].pct_change(2)
 
         # 2. Previous Bar Indicators (Lagged states) so the model can see
         #    the momentum of change. Lag a curated set of existing columns.
-        cols_to_lag = ['RSI_8', 'RSI_21', 'MACD', 'MACD_Hist', 'BB_Width_20', 'Return_1']
+        cols_to_lag = ['RSI_10', 'RSI_20', 'MACD', 'MACD_Hist', 'BB_Width_20', 'Return_1']
         for col in cols_to_lag:
             if col in self.df.columns:
                 self.df[f'{col}_Lag1'] = self.df[col].shift(1)
@@ -124,8 +128,8 @@ class FeatureEngineer:
 
     def add_mtf_context(self):
         print("Adding Multi-Timeframe Context (Position in Range)...")
-        # Rolling position within range across log/fib windows.
-        # 4H Timeframe -> 6 bars = 24H, 42 bars = 7D, 89 bars ~ 15D
+        # Rolling position within range across time-based windows.
+        # 4H Timeframe -> 6 bars = 24H, 42 bars = 7D, 180 bars ~ 1M
         for length in POS_RANGE_LENGTHS:
             roll_high = self.df['High'].rolling(window=length).max()
             roll_low = self.df['Low'].rolling(window=length).min()
