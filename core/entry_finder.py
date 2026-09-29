@@ -70,7 +70,7 @@ except Exception:
 # 1. RALLY / ENTRY-POINT DETECTION (on 4H bars)
 # ============================================================================
 
-def find_entry_points(df, bars_per_day, min_gain=200.0, min_days=14, max_days=120,
+def find_entry_points(df, bars_per_day, min_gain=200.0, min_days=14, max_days=200,
                       local_window_days=14):
     """
     Scan the 4H price series for local bottoms that launched a big rally.
@@ -147,17 +147,35 @@ def find_entry_points(df, bars_per_day, min_gain=200.0, min_days=14, max_days=12
 
 
 def _dedupe_entries(entries, bars_per_day, window_days=30):
-    """Keep only the strongest rally per `window_days` window (best gain wins)."""
+    """
+    Collapse redundant detections of the SAME rally.
+
+    Several local bottoms can climb to the same peak, so their entry→peak
+    windows overlap — they are one rally seen from different feet, not distinct
+    trades. We sort by gain (strongest first) and keep an entry only if its
+    [entry_idx, peak_idx] interval does NOT overlap an already-kept one (and its
+    entry is >= `window_days` from any kept entry). The biggest-gain member of
+    each overlapping cluster wins.
+    """
     if not entries:
         return []
     entries = sorted(entries, key=lambda x: x['gain_pct'], reverse=True)
-    kept, used = [], []
+    kept = []
     for e in entries:
-        ed = e['entry_date']
-        if any(abs((ed - u).days) < window_days for u in used):
-            continue
-        kept.append(e)
-        used.append(ed)
+        es, ep = e['entry_idx'], e['peak_idx']
+        redundant = False
+        for k in kept:
+            ks, kp = k['entry_idx'], k['peak_idx']
+            # Interval overlap (share any bar between entry and peak)?
+            if es <= kp and ks <= ep:
+                redundant = True
+                break
+            # Or entries too close together in calendar time.
+            if abs((e['entry_date'] - k['entry_date']).days) < window_days:
+                redundant = True
+                break
+        if not redundant:
+            kept.append(e)
     kept.sort(key=lambda x: x['entry_date'])
     return kept
 
@@ -578,7 +596,7 @@ def main():
     ap.add_argument('--symbol', default='ZECUSDT')
     ap.add_argument('--min-gain', type=float, default=200.0)
     ap.add_argument('--min-days', type=int, default=14)
-    ap.add_argument('--max-days', type=int, default=120)
+    ap.add_argument('--max-days', type=int, default=200)
     ap.add_argument('--before-days', type=int, default=90,
                     help='Context window (days) shown before each entry')
     ap.add_argument('--slow-only', action='store_true',
