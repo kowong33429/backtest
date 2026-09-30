@@ -603,11 +603,17 @@ def main():
                     help='Keep only ZEC-like slow accumulation (7d-mom<50%%, gain>=300%%, days>=30)')
     ap.add_argument('--no-macro', action='store_true')
     ap.add_argument('--no-news', action='store_true')
+    ap.add_argument('--out-dir', default=None,
+                    help='Output folder name (under the coin dir) or absolute path. '
+                         'Default: <coin dir>/entry_points')
     args = ap.parse_args()
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     csv_path = os.path.join(base_dir, args.csv) if not os.path.isabs(args.csv) else args.csv
-    out_dir = os.path.join(os.path.dirname(csv_path), 'entry_points')
+    if args.out_dir and os.path.isabs(args.out_dir):
+        out_dir = args.out_dir
+    else:
+        out_dir = os.path.join(os.path.dirname(csv_path), args.out_dir or 'entry_points')
     os.makedirs(out_dir, exist_ok=True)
 
     print("=" * 78)
