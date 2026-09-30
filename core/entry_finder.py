@@ -70,8 +70,47 @@ except Exception:
 # 1. RALLY / ENTRY-POINT DETECTION (on 4H bars)
 # ============================================================================
 
+def find_launch(highs, lows, i, p, bars_per_day, ignite_pct=0.30, ignite_days=21,
+                base_win_days=10, min_leg=0.5, undercut_tol=0.02):
+    """
+    Re-anchor the entry from the raw bottom `i` to the momentum-ignition
+    "launch point" (AGENTS.md Rule #6.2 — don't sit in a flat base that isn't
+    moving). Among the rally [i, p], a bar j qualifies as a launch if:
+
+      * L[j] is a local minimum within +/- base_win_days (a real base low), AND
+      * price gains >= ignite_pct within the next ignite_days (momentum ignites), AND
+      * the leg from L[j] to the peak is still meaningful (>= min_leg), AND
+      * price does not undercut L[j] (beyond undercut_tol) before the peak
+        (so it's the base of the *sustained* leg, not a failed pop).
+
+    We take the LATEST qualifying base-low — this skips the long accumulation
+    base and any earlier failed pops, landing right before the final run-up.
+    Falls back to the bottom `i` if nothing qualifies.
+    """
+    N = int(ignite_days * bars_per_day)
+    w = int(base_win_days * bars_per_day)
+    peak_price = highs[p]
+    launch = i
+    for j in range(i, p):
+        a, b = max(0, j - w), min(len(lows), j + w + 1)
+        if lows[j] > np.min(lows[a:b]):
+            continue  # not a local base low
+        fwd = highs[j + 1:min(j + 1 + N, p + 1)]
+        if len(fwd) == 0:
+            continue
+        if (np.max(fwd) - lows[j]) / lows[j] < ignite_pct:
+            continue  # momentum did not ignite
+        if (peak_price - lows[j]) / lows[j] < min_leg:
+            continue  # remaining leg to peak too small
+        if np.min(lows[j + 1:p + 1]) < lows[j] * (1 - undercut_tol):
+            continue  # launch low was undercut before the peak -> not sustained
+        launch = j  # keep the latest qualifier
+    return launch
+
+
 def find_entry_points(df, bars_per_day, min_gain=200.0, min_days=14, max_days=200,
-                      local_window_days=14):
+                      local_window_days=14, refine=True,
+                      ignite_pct=0.30, ignite_days=21):
     """
     Scan the 4H price series for local bottoms that launched a big rally.
 
@@ -122,23 +161,36 @@ def find_entry_points(df, bars_per_day, min_gain=200.0, min_days=14, max_days=20
         if gain < min_gain or days < min_days:
             continue
 
-        # 7-day momentum: how far did price run in the FIRST week after entry?
+        # 7-day momentum from the BOTTOM defines the setup type (slow vs pump).
         mom_end = min(i + 1 + mom_bars, n)
         mom_highs = highs[i + 1:mom_end]
         momentum_7d = ((np.max(mom_highs) - entry_low) / entry_low * 100.0
                        if len(mom_highs) > 0 else 0.0)
 
-        entry_ts = pd.Timestamp(dates[i])
+        # Re-anchor the entry to the momentum-ignition launch point.
+        j = find_launch(highs, lows, i, peak_idx, bars_per_day,
+                        ignite_pct, ignite_days) if refine else i
+        launch_low = lows[j]
+        launch_gain = (peak_price - launch_low) / launch_low * 100.0
+        launch_days = (pd.Timestamp(dates[peak_idx]) - pd.Timestamp(dates[j])).days
+        base_days = (pd.Timestamp(dates[j]) - pd.Timestamp(dates[i])).days
+
+        entry_ts = pd.Timestamp(dates[j])          # launch = realistic entry
         entries.append({
-            'entry_idx': i,
+            'entry_idx': j,                          # launch index (used for charts/dedup)
             'peak_idx': peak_idx,
-            'entry_date': entry_ts,
-            'entry_price': float(entry_low),
+            'entry_date': entry_ts,                  # launch date
+            'entry_price': float(launch_low),        # launch price
+            'bottom_idx': i,
+            'bottom_date': pd.Timestamp(dates[i]),
+            'bottom_price': float(entry_low),
             'peak_date': pd.Timestamp(dates[peak_idx]),
             'peak_price': float(peak_price),
-            'gain_pct': round(gain, 1),
-            'days': days,
-            'momentum_7d_pct': round(momentum_7d, 1),
+            'gain_pct': round(launch_gain, 1),       # from LAUNCH (realistic)
+            'days': launch_days,                     # from LAUNCH
+            'rally_gain_pct': round(gain, 1),        # full move from bottom
+            'base_days': base_days,                  # time spent basing before launch
+            'momentum_7d_pct': round(momentum_7d, 1),  # from bottom (setup type)
             'pattern': 'slow' if momentum_7d < 50 else 'v-shape',
             'year': int(entry_ts.year),
         })
@@ -443,10 +495,12 @@ def plot_entry(df, entry, bars_per_day, out_path, before_days=90, after_buffer=0
     from plotly.subplots import make_subplots
 
     i, peak_idx = entry['entry_idx'], entry['peak_idx']
+    bottom_idx = entry.get('bottom_idx', i)
     before_bars = int(before_days * bars_per_day)
     rally_bars = peak_idx - i
     after_bars = int(rally_bars * (1 + after_buffer))
-    lo = max(0, i - before_bars)
+    # Window must reach back past the bottom so the basing period is visible.
+    lo = max(0, min(i - before_bars, bottom_idx - int(10 * bars_per_day)))
     hi = min(len(df), i + after_bars + 1)
     win = df.iloc[lo:hi].copy()
 
@@ -454,9 +508,11 @@ def plot_entry(df, entry, bars_per_day, out_path, before_days=90, after_buffer=0
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03,
         row_heights=[0.78, 0.22],
         subplot_titles=(
-            f"{entry['entry_date'].date()} → {entry['peak_date'].date()}  "
-            f"(+{entry['gain_pct']}% in {entry['days']}d, {entry['pattern']}, "
-            f"7d-mom {entry['momentum_7d_pct']}%)",
+            f"bottom {entry['bottom_date'].date()} → launch {entry['entry_date'].date()} "
+            f"→ peak {entry['peak_date'].date()}  "
+            f"(+{entry['gain_pct']}% from launch in {entry['days']}d · "
+            f"rally +{entry.get('rally_gain_pct', entry['gain_pct'])}% from bottom · "
+            f"{entry['pattern']}, based {entry.get('base_days', 0)}d)",
             "Volume"),
     )
 
@@ -471,16 +527,23 @@ def plot_entry(df, entry, bars_per_day, out_path, before_days=90, after_buffer=0
             mode='lines', line=dict(color=color, width=1),
             name=f'SMA{w}'), row=1, col=1)
 
-    # Shade the "after entry" rally region
+    # Shade the base (bottom→launch, grey) and the post-launch rally (green)
+    fig.add_vrect(x0=entry['bottom_date'], x1=entry['entry_date'],
+                  fillcolor='gray', opacity=0.10, line_width=0, row=1, col=1)
     fig.add_vrect(x0=entry['entry_date'], x1=win['Date'].iloc[-1],
                   fillcolor='lime', opacity=0.06, line_width=0, row=1, col=1)
 
-    # Entry & peak markers
+    # Bottom, launch (entry) & peak markers
+    fig.add_trace(go.Scatter(
+        x=[entry['bottom_date']], y=[entry['bottom_price']], mode='markers+text',
+        marker=dict(symbol='circle', size=11, color='deepskyblue'),
+        text=['BOTTOM'], textposition='bottom center',
+        name='Bottom'), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=[entry['entry_date']], y=[entry['entry_price']], mode='markers+text',
         marker=dict(symbol='triangle-up', size=16, color='lime'),
-        text=['ENTRY'], textposition='bottom center',
-        name='Entry'), row=1, col=1)
+        text=['LAUNCH / ENTRY'], textposition='bottom center',
+        name='Launch (entry)'), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=[entry['peak_date']], y=[entry['peak_price']], mode='markers+text',
         marker=dict(symbol='star', size=16, color='gold'),
@@ -601,6 +664,12 @@ def main():
                     help='Context window (days) shown before each entry')
     ap.add_argument('--slow-only', action='store_true',
                     help='Keep only ZEC-like slow accumulation (7d-mom<50%%, gain>=300%%, days>=30)')
+    ap.add_argument('--no-refine', action='store_true',
+                    help='Anchor entry at the raw bottom instead of the momentum launch')
+    ap.add_argument('--ignite-pct', type=float, default=0.30,
+                    help='Launch ignition threshold: min gain fraction within --ignite-days (default 0.30)')
+    ap.add_argument('--ignite-days', type=int, default=21,
+                    help='Launch ignition window in days (default 21)')
     ap.add_argument('--no-macro', action='store_true')
     ap.add_argument('--no-news', action='store_true')
     ap.add_argument('--out-dir', default=None,
@@ -631,7 +700,10 @@ def main():
 
     # ---- Detect entries ----
     entries = find_entry_points(df, bars_per_day, args.min_gain,
-                                args.min_days, args.max_days)
+                                args.min_days, args.max_days,
+                                refine=not args.no_refine,
+                                ignite_pct=args.ignite_pct,
+                                ignite_days=args.ignite_days)
     if args.slow_only:
         entries = [e for e in entries if e['momentum_7d_pct'] < 50
                    and e['gain_pct'] >= 300 and e['days'] >= 30]
@@ -669,8 +741,9 @@ def main():
               f"+{e['gain_pct']}% / {e['days']}d ({e['pattern']}) -> {os.path.basename(cf)}")
 
     # ---- CSV ----
-    csv_cols = ['entry_date', 'entry_price', 'peak_date', 'peak_price',
-                'gain_pct', 'days', 'momentum_7d_pct', 'pattern', 'year']
+    csv_cols = ['bottom_date', 'bottom_price', 'entry_date', 'entry_price',
+                'base_days', 'peak_date', 'peak_price', 'gain_pct', 'days',
+                'rally_gain_pct', 'momentum_7d_pct', 'pattern', 'year']
     dfe = pd.DataFrame([{c: e[c] for c in csv_cols} for e in entries])
     csv_out = os.path.join(out_dir, 'entries.csv')
     dfe.to_csv(csv_out, index=False, encoding='utf-8-sig')
