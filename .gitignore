@@ -12,7 +12,9 @@ venv/
 
 # Data (too large for git)
 *.csv
-data/
+*.parquet
+
+
 
 # IDE
 .vscode/
