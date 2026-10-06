@@ -6,7 +6,18 @@
       "Skill(update-config)",
       "Skill(update-config:*)",
       "Bash(python -m py_compile core/labels.py core/optimizer.py core/visualizer.py core/backtester.py core/research_agent.py)",
-      "Bash(python -m py_compile core/labels.py core/optimizer.py core/visualizer.py core/backtester.py core/research_agent.py core/universal_researcher.py)"
+      "Bash(python -m py_compile core/labels.py core/optimizer.py core/visualizer.py core/backtester.py core/research_agent.py core/universal_researcher.py)",
+      "Bash(python -m py_compile core/features.py)",
+      "Bash(python -m py_compile core/backtester.py)",
+      "Bash(python -m py_compile core/visualizer.py)",
+      "Bash(python -m py_compile core/features.py core/labels.py core/optimizer.py core/backtester.py core/visualizer.py core/research_agent.py core/universal_researcher.py)",
+      "Bash(python -m py_compile core/backtester.py core/research_agent.py core/optimizer.py core/features.py core/visualizer.py core/labels.py)",
+      "Bash(brew install *)",
+      "Read(//opt/homebrew/Cellar/libomp/23.1.2/lib/**)",
+      "Bash(.venv/bin/python -c \"import xgboost; print\\('xgboost OK', xgboost.__version__\\)\")",
+      "Bash(.venv/bin/python core/research_agent.py --symbol ZECUSDT)",
+      "Bash(.venv/bin/python -m py_compile core/backtester.py core/optimizer.py core/research_agent.py)",
+      "Bash(.venv/bin/python -m py_compile core/backtester.py core/optimizer.py core/research_agent.py core/visualizer.py)"
     ]
   }
 }

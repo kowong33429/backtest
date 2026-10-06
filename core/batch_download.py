@@ -36,8 +36,8 @@ def get_all_binance_futures_symbols():
         return []
 
 
-def get_already_downloaded(base_dir):
-    """Check which symbols already have data downloaded."""
+def get_already_downloaded(base_dir, interval='4h'):
+    """Check which symbols already have `interval` data downloaded."""
     data_dir = os.path.join(base_dir, 'data')
     if not os.path.exists(data_dir):
         return set()
@@ -46,7 +46,7 @@ def get_already_downloaded(base_dir):
         folder_path = os.path.join(data_dir, folder)
         if os.path.isdir(folder_path):
             # Check if CSV exists
-            csv_file = os.path.join(folder_path, f"{folder.upper()}_4h_full.csv")
+            csv_file = os.path.join(folder_path, f"{folder.upper()}_{interval}_full.csv")
             if os.path.exists(csv_file):
                 downloaded.add(folder.upper() + 'USDT' if not folder.upper().endswith('USDT') else folder.upper())
     return downloaded
@@ -58,6 +58,8 @@ def main():
                         help='Download a single symbol (e.g., DASHUSDT)')
     parser.add_argument('--priority', action='store_true',
                         help='Download only 10 priority coins')
+    parser.add_argument('--interval', type=str, default='4h',
+                        help='Kline interval (e.g. 4h, 1d). Default 4h.')
     args = parser.parse_args()
 
     core_dir = os.path.dirname(os.path.abspath(__file__))
@@ -84,15 +86,15 @@ def main():
             return
 
     print(f"{'=' * 60}")
-    print(f"  Batch Download: {len(symbols)} coins (4H timeframe)")
+    print(f"  Batch Download: {len(symbols)} coins ({args.interval} timeframe)")
     print(f"{'=' * 60}\n")
 
     success = 0
     failed = 0
     skipped = 0
 
-    downloaded = get_already_downloaded(base_dir)
-    print(f"  Found {len(downloaded)} already downloaded coins.")
+    downloaded = get_already_downloaded(base_dir, interval=args.interval)
+    print(f"  Found {len(downloaded)} already downloaded coins ({args.interval}).")
 
     for i, sym in enumerate(symbols, 1):
         if sym in downloaded:
@@ -102,7 +104,7 @@ def main():
             
         print(f"[{i}/{len(symbols)}] Downloading {sym}...")
         result = subprocess.run(
-            [sys.executable, downloader, '--symbol', sym, '--interval', '4h'],
+            [sys.executable, downloader, '--symbol', sym, '--interval', args.interval],
             capture_output=True, text=True, encoding='utf-8'
         )
         if result.returncode == 0:

@@ -75,12 +75,13 @@ def select_scale_free(cols):
 # ----------------------------------------------------------------------------
 # Coin discovery
 # ----------------------------------------------------------------------------
-def discover_coins(base_dir, basket_json=None, symbols=None):
-    """Return list of (symbol, csv_path) for coins that have a 4H CSV on disk."""
+def discover_coins(base_dir, basket_json=None, symbols=None, interval='4h'):
+    """Return list of (symbol, csv_path) for coins that have a `interval` CSV on disk."""
     data_dir = os.path.join(base_dir, 'data')
+    suffix = f'_{interval}_full.csv'
     found = {}
-    for csv in glob.glob(os.path.join(data_dir, '*', '*_4h_full.csv')):
-        sym = os.path.basename(csv).replace('_4h_full.csv', '').upper()
+    for csv in glob.glob(os.path.join(data_dir, '*', f'*{suffix}')):
+        sym = os.path.basename(csv).replace(suffix, '').upper()
         found[sym] = csv
 
     if symbols:
@@ -114,13 +115,16 @@ def build_coin(symbol, csv_path, macro, fg, tp_pct, sl_pct, horizon_days,
     med = df['Date'].diff().median()
     bpd = max(1, round(pd.Timedelta(days=1) / med))
 
-    # 1) Labels on the FULL series (needs forward highs/lows).
+    # 1) Labels on the FULL series: forward triple-barrier (needs future highs/
+    #    lows; labeler.py), emitting Entry_Label/Label_EndDate/Sample_Weight.
     lab = EntryLabeler(df, tp_pct=tp_pct, sl_pct=sl_pct,
                        horizon_days=horizon_days, bars_per_day=bpd).generate()
     lab = lab[['Date', 'Entry_Label', 'Label_EndDate', 'Sample_Weight']]
 
-    # 2) Features (strict n-1 shift applied inside FeatureEngineer).
-    feat = FeatureEngineer(df.copy()).generate_all_features()
+    # 2) Features (strict n-1 shift applied inside FeatureEngineer). Time-based
+    #    windows scale with the series' bars/day so they span the same real time
+    #    on 4H (bpd=6) and 1D (bpd=1).
+    feat = FeatureEngineer(df.copy(), bars_per_day=bpd).generate_all_features()
     # Funding is a base column (unshifted) in features.py — shift it here so the
     # decision at Open[T] only sees funding realized up to T-1.
     if 'Funding_Rate' in feat.columns:
@@ -161,7 +165,13 @@ def main():
                     help='Explicit symbol list (overrides --basket)')
     ap.add_argument('--tp', type=float, default=1.00, help='TP fraction (default 1.00=+100%%)')
     ap.add_argument('--sl', type=float, default=0.40, help='SL fraction (default 0.40=-40%%)')
-    ap.add_argument('--horizon-days', type=int, default=30)
+    ap.add_argument('--horizon-days', type=int, default=30,
+                    help='forward horizon (days) to reach the TP before the SL')
+    ap.add_argument('--interval', default='4h',
+                    help="Timeframe suffix of the source CSVs (e.g. 4h, 1d). Default 4h.")
+    ap.add_argument('--min-rows', type=int, default=1500,
+                    help="Skip coins with fewer than this many bars. Default 1500 "
+                         "(~250 days on 4H); lower it for daily data (e.g. 400).")
     ap.add_argument('--no-macro', action='store_true')
     ap.add_argument('--out', default='data/model/entry_panel.parquet')
     args = ap.parse_args()
@@ -171,9 +181,10 @@ def main():
     out_path = os.path.join(base_dir, args.out) if not os.path.isabs(args.out) else args.out
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    pairs = discover_coins(base_dir, basket_json, args.symbols)
+    pairs = discover_coins(base_dir, basket_json, args.symbols, interval=args.interval)
+    label_desc = f"ENTRY +{args.tp*100:.0f}%/{args.horizon_days}d/-{args.sl*100:.0f}%"
     print(f"[Dataset] Building panel from {len(pairs)} coins "
-          f"(label +{args.tp*100:.0f}%/{args.horizon_days}d/-{args.sl*100:.0f}%)")
+          f"(interval={args.interval}, label {label_desc})")
     if not pairs:
         print("No coins with CSVs found. Run trend_scanner + batch_download first.")
         return
@@ -197,7 +208,8 @@ def main():
     for k, (sym, csv) in enumerate(pairs, 1):
         print(f"[{k}/{len(pairs)}] {sym}")
         try:
-            m = build_coin(sym, csv, macro, fg, args.tp, args.sl, args.horizon_days)
+            m = build_coin(sym, csv, macro, fg, args.tp, args.sl, args.horizon_days,
+                           min_rows=args.min_rows)
             if m is not None:
                 frames.append(m)
         except Exception as e:

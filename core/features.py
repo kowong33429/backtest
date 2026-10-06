@@ -17,17 +17,33 @@ ADX_LENGTHS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 ATR_LENGTHS = [10, 14, 20, 30, 40, 50, 60, 70, 80, 90, 100]  # keep 14 (backtester + ATR_Ratio)
 SMA_LENGTHS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 200] # keep 50 & 200 (SMA_Cross)
 
-# Time-based windows expressed in 4H bars:
-#   1D=6, 3D=18, 7D=42, 15D=90, 1M=180, 3M=540, 6M=1080, 12M=2190
-RETURN_LENGTHS = [6, 18, 42, 90, 180, 540, 1080, 2190]       # % change vs past
-POS_RANGE_LENGTHS = [6, 18, 42, 90, 180, 540, 1080, 2190]    # position within rolling range
-VWAP_LENGTHS = [6, 18, 42, 90, 180, 540, 1080, 2190]         # distance from rolling VWAP
-DIST_HL_LENGTHS = [180, 540, 1080, 2190]                     # distance from 1M/3M/6M/1Y High & Low
+# Time-based windows expressed in CALENDAR DAYS, then converted to bars at
+# runtime via `bars_per_day` (so the same feature spans the same real time on
+# any timeframe):
+#   1D, 3D, 7D, 15D, 1M, 3M, 6M, 1Y
+# On the 4H timeframe (bars_per_day=6) these reproduce the original bar windows
+# EXACTLY: [6, 18, 42, 90, 180, 540, 1080, 2190] (and HL: [180, 540, 1080, 2190]).
+# On the 1D timeframe (bars_per_day=1) they become the daily-native windows
+# [1, 3, 7, 15, 30, 90, 180, 365] (and HL: [30, 90, 180, 365]).
+TIME_WINDOWS_DAYS = [1, 3, 7, 15, 30, 90, 180, 365]  # returns / pos-in-range / VWAP distance
+DIST_HL_DAYS = [30, 90, 180, 365]                    # distance from 1M/3M/6M/1Y High & Low
 
 
 class FeatureEngineer:
-    def __init__(self, df):
+    def __init__(self, df, bars_per_day=6):
+        """
+        bars_per_day : bars per calendar day of the input series. Default 6 is the
+        4H timeframe (6 bars/day) and reproduces the original windows unchanged;
+        pass 1 for daily bars. Indicator lengths (RSI/BB/ADX/ATR/SMA/Volume) are
+        kept as-is across timeframes (daily-native); only the time-based windows
+        (returns, position-in-range, VWAP distance, Hi/Lo distance) scale with it.
+        """
         self.df = df.copy()
+        self.bars_per_day = max(1, int(bars_per_day))
+        self.return_lengths = [d * self.bars_per_day for d in TIME_WINDOWS_DAYS]
+        self.pos_range_lengths = [d * self.bars_per_day for d in TIME_WINDOWS_DAYS]
+        self.vwap_lengths = [d * self.bars_per_day for d in TIME_WINDOWS_DAYS]
+        self.dist_hl_lengths = [d * self.bars_per_day for d in DIST_HL_DAYS]
 
     def add_technical_indicators(self):
         print("Adding Technical Indicators (stepped windows)...")
@@ -86,12 +102,12 @@ class FeatureEngineer:
         self.df['SMA_Cross'] = (sma50 > sma200).astype(int)
 
         # 3. Multi-horizon returns (time-based bars)
-        for length in RETURN_LENGTHS:
+        for length in self.return_lengths:
             self.df[f'Return_{length}b'] = self.df['Close'].pct_change(length)
 
         # 4. Distance from multi-timeframe Low/High (1M/3M/6M/1Y)
         n = len(self.df)
-        for length in DIST_HL_LENGTHS:
+        for length in self.dist_hl_lengths:
             window = min(length, n - 1)
             if window <= 50:
                 continue
@@ -128,9 +144,9 @@ class FeatureEngineer:
 
     def add_mtf_context(self):
         print("Adding Multi-Timeframe Context (Position in Range)...")
-        # Rolling position within range across time-based windows.
-        # 4H Timeframe -> 6 bars = 24H, 42 bars = 7D, 180 bars ~ 1M
-        for length in POS_RANGE_LENGTHS:
+        # Rolling position within range across time-based windows (scaled by
+        # bars_per_day: e.g. on 4H 6 bars = 24H, 42 = 7D, 180 ~ 1M).
+        for length in self.pos_range_lengths:
             roll_high = self.df['High'].rolling(window=length).max()
             roll_low = self.df['Low'].rolling(window=length).min()
             self.df[f'Pos_In_{length}b'] = (self.df['Close'] - roll_low) / (roll_high - roll_low + 1e-9)
@@ -149,7 +165,7 @@ class FeatureEngineer:
         # 2. Volume Profile (rolling VWAP distance across windows)
         typical_price = (self.df['High'] + self.df['Low'] + self.df['Close']) / 3
         vol_price = self.df['Volume'] * typical_price
-        for length in VWAP_LENGTHS:
+        for length in self.vwap_lengths:
             vwap = vol_price.rolling(window=length).sum() / (self.df['Volume'].rolling(window=length).sum() + 1e-9)
             self.df[f'Dist_VWAP_{length}b'] = (self.df['Close'] - vwap) / (vwap + 1e-9)
 

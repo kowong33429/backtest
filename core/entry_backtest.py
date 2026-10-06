@@ -95,6 +95,8 @@ def main():
     ap.add_argument('--fee', type=float, default=0.001, help='fee per side (0.001=0.1%%)')
     ap.add_argument('--slippage', type=float, default=0.0005)
     ap.add_argument('--notional', type=float, default=100.0, help='$ per trade')
+    ap.add_argument('--interval', default='4h',
+                    help="Timeframe suffix of the source CSVs (e.g. 4h, 1d). Default 4h.")
     ap.add_argument('--out-dir', default='data/model')
     args = ap.parse_args()
 
@@ -116,8 +118,9 @@ def main():
           f"(round-trip {2*(args.fee+args.slippage)*100:.2f}%)")
     print("=" * 72)
 
-    csvs = {os.path.basename(c).replace('_4h_full.csv', '').upper(): c
-            for c in glob.glob(os.path.join(base, 'data', '*', '*_4h_full.csv'))}
+    suffix = f'_{args.interval}_full.csv'
+    csvs = {os.path.basename(c).replace(suffix, '').upper(): c
+            for c in glob.glob(os.path.join(base, 'data', '*', f'*{suffix}'))}
 
     med = (pd.read_csv(next(iter(csvs.values())), usecols=['Date'])['Date']
            .pipe(pd.to_datetime).diff().median())

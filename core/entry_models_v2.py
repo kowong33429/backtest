@@ -1,13 +1,15 @@
 """
-entry_models_v2.py — Two NEW entry-point models, built & backtested side-by-side
+entry_models_v2.py — Baseline entry-point model orchestrator (m1 +100%/60d)
 
 WHY THIS EXISTS
 ---------------
-The user asked for two new entry definitions, each as its own model, with the
-ORIGINAL pipeline left untouched and a final head-to-head comparison:
+The BASELINE entry model, built with the ORIGINAL leakage-safe pipeline left
+untouched:
 
   * Model 1 ("m1_100pct_60d") : entry points that run to +100% within 2 months.
-  * Model 2 ("m2_50pct_30d")  : entry points that run to +50%  within 1 month.
+
+(The project also trialled a +50%/30d "m2" and a daily rebuild; those lost on
+total P&L and were removed in the cleanup — see the README experiment tables.)
 
 HOW (and why it's a thin orchestrator, not a fork)
 --------------------------------------------------
@@ -58,10 +60,6 @@ MODELS = {
     'm1_100pct_60d': {
         'tp': 1.00, 'sl': 0.40, 'horizon_days': 60,
         'desc': '+100% within 60d (2 months), stop -40%  [R:R 2.5]',
-    },
-    'm2_50pct_30d': {
-        'tp': 0.50, 'sl': 0.20, 'horizon_days': 30,
-        'desc': '+50% within 30d (1 month), stop -20%  [R:R 2.5]',
     },
 }
 
