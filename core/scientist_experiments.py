@@ -48,7 +48,9 @@ def simulate_coin_physics(df, sig_dates, tp, sl, horizon_bars, fee, slip, notion
         
         exit_i, exit_px, outcome = end, cl[end], 'TIME'
         highest_seen = hi[entry_i]
-        is_summer = summer[entry_i]
+        # N-1 rule: the season/regime is read from the signal candle (entry_i - 1),
+        # not the execution candle whose close is still in the future at entry.
+        is_summer = summer[entry_i - 1]
         
         for j in range(entry_i, end + 1):
             if not is_summer:

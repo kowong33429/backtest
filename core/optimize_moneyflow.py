@@ -32,9 +32,10 @@ def calculate_indicators(df):
     # Chaikin Money Flow (CMF) - measures buying/selling pressure
     df['CMF'] = ta.cmf(df['High'], df['Low'], df['Close'], df['Volume'], length=20)
     
-    df['ATR'] = df['ATR'].ffill().bfill()
-    df['MFI'] = df['MFI'].ffill().bfill()
-    df['CMF'] = df['CMF'].ffill().bfill()
+    # N-1 rule: forward-fill only (bfill would leak future warmup values backward).
+    df['ATR'] = df['ATR'].ffill()
+    df['MFI'] = df['MFI'].ffill()
+    df['CMF'] = df['CMF'].ffill()
     return df
 
 def simulate_moneyflow_fast(df, sig_dates, tp, sl, horizon_bars, fee, slip, atr_mult_riskon, atr_mult_riskoff, cmf_thresh, mfi_thresh):
@@ -59,13 +60,15 @@ def simulate_moneyflow_fast(df, sig_dates, tp, sl, horizon_bars, fee, slip, atr_
         if entry_i >= len(df): continue
         entry_px = o[entry_i]
         if entry_px <= 0 or not np.isfinite(entry_px): continue
-        
+        if not np.isfinite(atr[entry_i]): continue  # skip while ATR is still warming up
+
         end = min(entry_i + horizon_bars, len(df) - 1)
         fixed_dn = entry_px * (1 - sl)
         highest_seen = hi[entry_i]
         exit_i, exit_px = end, cl[end]
-        
-        current_econ = econ_regime[entry_i]
+
+        # N-1 rule: the econ regime is read from the signal candle (entry_i - 1).
+        current_econ = econ_regime[entry_i - 1]
         active_atr_mult = atr_mult_riskon if current_econ >= 0 else atr_mult_riskoff
         
         for j in range(entry_i, end + 1):
@@ -90,41 +93,57 @@ def simulate_moneyflow_fast(df, sig_dates, tp, sl, horizon_bars, fee, slip, atr_
         
     return total_net
 
-def objective(trial, sig, csvs, macro_df):
+def evaluate_params(params, sig, csvs, macro_df):
+    """Run the full backtest for one parameter set over the given signal slice."""
     tp = 3.5 # not strictly used if we just trail and early exit
-    sl = trial.suggest_float('sl', 0.4, 0.7, step=0.05)
-    
-    # Quant AI optimizes Econ + Money Flow rules:
-    atr_mult_riskon = trial.suggest_float('atr_mult_riskon', 12.0, 20.0, step=1.0)
-    atr_mult_riskoff = trial.suggest_float('atr_mult_riskoff', 2.0, 8.0, step=1.0)
-    horizon_days = trial.suggest_int('horizon_days', 60, 120, step=10)
-    
-    # Money Flow parameters
-    cmf_thresh = trial.suggest_float('cmf_thresh', -0.5, -0.05, step=0.05) # Exit if CMF is very negative
-    mfi_thresh = trial.suggest_float('mfi_thresh', 10, 40, step=5) # Exit if MFI plunges
-    
+    sl = params['sl']
+    atr_mult_riskon = params['atr_mult_riskon']
+    atr_mult_riskoff = params['atr_mult_riskoff']
+    horizon_days = params['horizon_days']
+    cmf_thresh = params['cmf_thresh']
+    mfi_thresh = params['mfi_thresh']
+
     total_pnl = 0.0
-    
     for sym, grp in sig.groupby('symbol'):
         csv = csvs.get(sym)
         if csv is None: continue
-        
+
         df = pd.read_csv(csv)
         df['Date'] = pd.to_datetime(df['Date'])
-        
+
         df['Macro_Date'] = df['Date'].dt.normalize()
         df = pd.merge(df, macro_df[['Macro_Date', 'Econ_Risk_On']], on='Macro_Date', how='left')
         df['Econ_Risk_On'] = df['Econ_Risk_On'].ffill().fillna(0)
-        
+
         df = calculate_indicators(df)
-        
+
         dates_set = set(grp['Date'])
-        horizon_bars = horizon_days * 6 
-            
-        total_pnl += simulate_moneyflow_fast(df, dates_set, tp, sl, horizon_bars, 0.001, 0.0005, 
+        horizon_bars = horizon_days * 6
+
+        total_pnl += simulate_moneyflow_fast(df, dates_set, tp, sl, horizon_bars, 0.001, 0.0005,
                                              atr_mult_riskon, atr_mult_riskoff, cmf_thresh, mfi_thresh)
-        
+
     return total_pnl
+
+def objective(trial, sig, csvs, macro_df):
+    params = {
+        'sl': trial.suggest_float('sl', 0.4, 0.7, step=0.05),
+        # Quant AI optimizes Econ + Money Flow rules:
+        'atr_mult_riskon': trial.suggest_float('atr_mult_riskon', 12.0, 20.0, step=1.0),
+        'atr_mult_riskoff': trial.suggest_float('atr_mult_riskoff', 2.0, 8.0, step=1.0),
+        'horizon_days': trial.suggest_int('horizon_days', 60, 120, step=10),
+        # Money Flow parameters
+        'cmf_thresh': trial.suggest_float('cmf_thresh', -0.5, -0.05, step=0.05), # Exit if CMF is very negative
+        'mfi_thresh': trial.suggest_float('mfi_thresh', 10, 40, step=5), # Exit if MFI plunges
+    }
+    return evaluate_params(params, sig, csvs, macro_df)
+
+
+def time_split(sig, frac=0.7):
+    """Chronological hold-out: earliest `frac` of signal dates train, the rest validate."""
+    dates_sorted = np.sort(sig['Date'].unique())
+    cutoff = pd.Timestamp(dates_sorted[int(len(dates_sorted) * frac)])
+    return sig[sig['Date'] <= cutoff], sig[sig['Date'] > cutoff], cutoff
 
 def main():
     print("="*60)
@@ -135,23 +154,31 @@ def main():
     oof = pd.read_parquet(os.path.join(base, 'data/model/v2/m1_100pct_60d/entry_oof.parquet'))
     oof['Date'] = pd.to_datetime(oof['Date'])
     sig = oof[oof['oof_prob_xgb'] >= 0.70]
-    
-    min_date = oof['Date'].min() - pd.Timedelta(days=365) 
+
+    # Chronological train/validation split: tune on the past, report on the unseen future.
+    sig_train, sig_valid, cutoff = time_split(sig, frac=0.7)
+    print(f"Train: {len(sig_train)} signals (<= {cutoff.date()}) | "
+          f"Validation: {len(sig_valid)} signals (> {cutoff.date()})")
+
+    min_date = oof['Date'].min() - pd.Timedelta(days=365)
     max_date = oof['Date'].max() + pd.Timedelta(days=30)
     macro_df = load_macro_data(min_date, max_date)
-    
+
     suffix = '_4h_full.csv'
     csvs = {os.path.basename(c).replace(suffix, '').upper(): c for c in glob.glob(os.path.join(base, 'data', '*', f'*{suffix}'))}
-            
+
     study = optuna.create_study(direction='maximize')
-    
-    print("AI is optimizing CMF (Chaikin Money Flow) and MFI exits with fixed $100 per trade...")
-    study.optimize(lambda trial: objective(trial, sig, csvs, macro_df), n_trials=40, n_jobs=1)
-    
+
+    print("AI is optimizing CMF (Chaikin Money Flow) and MFI exits (train slice)...")
+    study.optimize(lambda trial: objective(trial, sig_train, csvs, macro_df), n_trials=40, n_jobs=1)
+
+    val_pnl = evaluate_params(study.best_params, sig_valid, csvs, macro_df)
+
     print("\n" + "="*60)
     print(" AI OPTIMIZATION FINISHED")
     print("="*60)
-    print(f"Best PnL found: ${study.best_value:,.2f}")
+    print(f"IN-SAMPLE (train) best PnL:  ${study.best_value:,.2f}")
+    print(f"OUT-OF-SAMPLE (validation):  ${val_pnl:,.2f}")
     print("Best Parameters:")
     for key, value in study.best_params.items():
         print(f"  {key}: {value}")

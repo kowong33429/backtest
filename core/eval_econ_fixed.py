@@ -26,7 +26,8 @@ def load_macro_data(start_date, end_date):
 
 def calculate_indicators(df):
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-    df['ATR'] = df['ATR'].ffill().bfill()
+    # N-1 rule: forward-fill only (bfill would leak future warmup values backward).
+    df['ATR'] = df['ATR'].ffill()
     return df
 
 def run_evaluation():
@@ -81,13 +82,15 @@ def run_evaluation():
             if entry_i >= len(df): continue
             entry_px = o[entry_i]
             if entry_px <= 0 or not np.isfinite(entry_px): continue
-            
+            if not np.isfinite(atr[entry_i]): continue  # skip while ATR is still warming up
+
             end = min(entry_i + horizon_bars, len(df) - 1)
             fixed_dn = entry_px * (1 - sl)
             highest_seen = hi[entry_i]
             exit_i, exit_px = end, cl[end]
-            
-            current_econ = econ_regime[entry_i]
+
+            # N-1 rule: the econ regime is read from the signal candle (entry_i - 1).
+            current_econ = econ_regime[entry_i - 1]
             active_atr_mult = atr_mult_riskon if current_econ >= 0 else atr_mult_riskoff
             
             for j in range(entry_i, end + 1):

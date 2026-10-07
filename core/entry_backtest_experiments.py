@@ -11,10 +11,10 @@ def calculate_indicators(df):
     df['ATR_14'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     df['SMA_50'] = ta.sma(df['Close'], length=50)
     df['SMA_200'] = ta.sma(df['Close'], length=200)
-    # Fill NAs
-    df['ATR_14'] = df['ATR_14'].ffill().bfill()
-    df['SMA_50'] = df['SMA_50'].ffill().bfill()
-    df['SMA_200'] = df['SMA_200'].ffill().bfill()
+    # N-1 rule: forward-fill only (bfill would leak future warmup values backward).
+    df['ATR_14'] = df['ATR_14'].ffill()
+    df['SMA_50'] = df['SMA_50'].ffill()
+    df['SMA_200'] = df['SMA_200'].ffill()
     return df
 
 def simulate_coin_mode(df, sig_dates, mode, tp, sl, horizon_bars, fee, slip, notional, atr_mult=6.0):
@@ -106,8 +106,11 @@ def simulate_coin_mode(df, sig_dates, mode, tp, sl, horizon_bars, fee, slip, not
                 gross = exit_px / entry_px - 1.0
 
         elif mode == 'Regime':
-            # If entry is during Uptrend (SMA50 > SMA200), use Trailing. Else use Fixed.
-            is_uptrend = sma50[entry_i] > sma200[entry_i]
+            # N-1 rule: judge the regime on candle n-1 (the signal candle, entry_i - 1),
+            # not the execution candle whose close is still in the future at entry.
+            dec = entry_i - 1
+            is_uptrend = (np.isfinite(sma50[dec]) and np.isfinite(sma200[dec])
+                          and sma50[dec] > sma200[dec])
             if is_uptrend:
                 # Same as Trailing
                 for j in range(entry_i, end + 1):

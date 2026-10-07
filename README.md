@@ -91,6 +91,81 @@ encode the same thing. It is only meaningful when paired with the entry model
 
 ---
 
+## ⚠️ AI-optimized exits (Optuna): a leakage + overfitting cautionary tale
+
+Four "quant" exit optimizers (`optimize_exits.py`, `optimize_moneyflow.py`,
+`optimize_finance.py`, `optimize_econ.py`) use Optuna to search exit parameters
+(ATR-trailing multiples, money-flow thresholds, econ regime rules, horizons) to
+**maximize total P&L**. On first write they looked spectacular — **$20k–29k** —
+but that number was produced two illegal ways at once:
+
+1. **Look-ahead leakage** — indicators filled with `.ffill().bfill()` (bfill pulls
+   future values into the warm-up window) and the macro/regime state read from the
+   *execution* candle `entry_i` instead of the signal candle `entry_i-1`.
+2. **No hold-out** — Optuna optimized and reported P&L on the **entire** dataset,
+   so the "best" parameters were curve-fit to the very data they were scored on.
+
+Both were fixed (ffill-only per [`AGENTS.md`](./AGENTS.md), regime read at `n-1`,
+and a chronological **70/30 train→validation split** — tune on `≤ 2024-04-20`,
+report on the unseen remainder). The result is decisive:
+
+| Optimizer (m1 entry, thr 0.70) | 🟥 BEFORE — "cheating"<br>in-sample, whole set, +leakage | 🟩 AFTER — train<br>(in-sample 70%, no leak) | 🟩 AFTER — **validation**<br>(**true OOS 30%**, no leak) |
+|---|--:|--:|--:|
+| `optimize_exits` (ATR trailing) | **+$20,708** | +$24,665 | **−$2,026** |
+| `optimize_moneyflow` (CMF/MFI) | **+$22,381** | +$21,625 | **−$1,865** |
+| `optimize_finance` (sector rotation) | **+$22,518** | +$24,538 | **−$2,509** |
+| *baseline Fixed TP (reference)* | — | *+$13,740* | *−$2,164* |
+
+> The BEFORE column reproduces the headline figures (an earlier run reported
+> ~$27k–29k; Optuna is stochastic without a fixed seed, so magnitudes wander but
+> the story doesn't). Train P&L still looks great **after** the fix — that is
+> exactly the trap. Only the **validation** column is honest.
+
+**Takeaways.**
+- Every optimized exit **loses money out-of-sample** (−$1.9k to −$2.5k). The
+  $20k–29k edge was an illusion of leakage + curve-fitting, not a real strategy.
+- On the *same* validation window a plain fixed TP is also negative (−$2,164) —
+  that period (2024-H2 → 2025 drawdown) is a hard regime for everyone — so the
+  tuned exits add **no edge over the baseline** even on their own terms.
+- This is the whole reason the pipeline mandates strict N-1 + out-of-sample
+  testing: in-sample optimization will happily manufacture a five-figure "profit"
+  that evaporates the moment it meets unseen data. **The simple fixed TP baseline
+  remains the only configuration that survives honest evaluation.**
+
+### Year-by-year balance — the "edge" is a single outlier year
+
+Same entry everywhere (m1 OOF signal, enter at next `Open`); only the exit differs.
+`$100/trade`, 0.30% round-trip. Optimizers use the best params their honest search
+found. Reproduce with `python core/yearly_compare.py --threshold {0.70|0.60}`.
+
+**Threshold 0.70** (matches the optimizers' built-in entry filter):
+
+| Strategy | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 | **TOTAL** | **ex-2020** |
+|----------|-----:|-----:|-----:|-----:|-----:|-----:|-----:|----------:|------------:|
+| **baseline fixed TP+100%** | 2,736 | 3,590 | −45 | 4,154 | 1,842 | 330 | 703 | 13,310 | **10,574** |
+| + optimize_exits | 15,181 | 2,197 | −1,024 | 4,201 | 1,663 | 367 | 624 | 23,209 | 8,028 |
+| + optimize_moneyflow | 12,075 | 3,179 | −1,597 | 3,982 | 2,621 | 51 | −131 | 20,181 | 8,106 |
+| + optimize_finance | 14,111 | 3,885 | −1,486 | 4,018 | 1,553 | 104 | 232 | 22,418 | 8,307 |
+
+**Threshold 0.60** (the kept baseline's actual cutoff — maximizes total $):
+
+| Strategy | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 | **TOTAL** | **ex-2020** |
+|----------|-----:|-----:|-----:|-----:|-----:|-----:|-----:|----------:|------------:|
+| **baseline fixed TP+100%** | 2,925 | 4,788 | −710 | 4,151 | 2,563 | −1,109 | 2,998 | 15,606 | **12,681** |
+| + optimize_exits | 15,158 | 3,387 | −1,349 | 4,274 | 1,833 | −135 | 537 | 23,705 | 8,547 |
+| + optimize_moneyflow | 12,200 | 3,686 | −2,118 | 4,185 | 2,634 | −346 | 905 | 21,145 | 8,945 |
+| + optimize_finance | 14,176 | 4,181 | −2,212 | 4,303 | 1,492 | −498 | 1,326 | 22,768 | 8,592 |
+
+**The optimizers' entire lead comes from 2020 alone** — one tail year (sparse early
+listings, a few monster pumps) that long-horizon loose-stop trailing happened to
+curve-fit. Strip 2020 and the plain **fixed TP wins outright at both thresholds**
+(ex-2020: 10.6k/12.7k vs ~8–9k), while trading 2–3× fewer times and staying positive
+in almost every year — the optimized exits lose **−$1k to −$2.2k in 2022** and sag
+through the 2024-H2→2025 out-of-sample window. A larger total $ built on one
+irreproducible year is not an edge.
+
+---
+
 ## 🔁 Reproduce the baseline
 
 ```bash

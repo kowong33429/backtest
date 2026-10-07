@@ -33,14 +33,17 @@ def simulate_coin(df, sig_dates, tp, sl, horizon_bars, fee, slip, notional, exit
     """Walk one coin's bars; open at next Open on a signal, exit based on exit_mode."""
     df = df.sort_values('Date').reset_index(drop=True)
     
-    # Calculate indicators if regime mode is used
-    if exit_mode == 'regime':
+    # Trailing-based modes need ATR; 'regime' also needs the SMAs for the regime test.
+    # (always_trail trails too, so it must compute ATR as well.)
+    if exit_mode in ('regime', 'always_trail'):
         df['ATR_14'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
         df['SMA_50'] = ta.sma(df['Close'], length=50)
         df['SMA_200'] = ta.sma(df['Close'], length=200)
-        df['ATR_14'] = df['ATR_14'].ffill().bfill()
-        df['SMA_50'] = df['SMA_50'].ffill().bfill()
-        df['SMA_200'] = df['SMA_200'].ffill().bfill()
+        # N-1 rule: forward-fill only. bfill would pull future (post-warmup)
+        # values backward into the warmup window = look-ahead bias.
+        df['ATR_14'] = df['ATR_14'].ffill()
+        df['SMA_50'] = df['SMA_50'].ffill()
+        df['SMA_200'] = df['SMA_200'].ffill()
         atr = df['ATR_14'].values
         sma50 = df['SMA_50'].values
         sma200 = df['SMA_200'].values
@@ -68,8 +71,18 @@ def simulate_coin(df, sig_dates, tp, sl, horizon_bars, fee, slip, notional, exit
         
         exit_i, exit_px, outcome = end, cl[end], 'TIME'
         highest_seen = hi[entry_i]
-        
-        if exit_mode == 'always_trail' or (exit_mode == 'regime' and sma50[entry_i] > sma200[entry_i]):
+
+        # N-1 rule: judge the regime on candle n-1 (the signal candle), never on
+        # the execution candle's own close, which is still in the future at entry.
+        dec = entry_i - 1
+        if exit_mode == 'always_trail':
+            use_trail = True
+        elif exit_mode == 'regime' and np.isfinite(sma50[dec]) and np.isfinite(sma200[dec]):
+            use_trail = sma50[dec] > sma200[dec]
+        else:
+            use_trail = False
+
+        if use_trail and np.isfinite(atr[entry_i]):
             # UPTREND or ALWAYS_TRAIL -> Use Trailing Stop, No TP
             for j in range(entry_i, end + 1):
                 highest_seen = max(highest_seen, hi[j])
@@ -123,7 +136,7 @@ def main():
     ap.add_argument('--fee', type=float, default=0.001, help='fee per side (0.001=0.1%%)')
     ap.add_argument('--slippage', type=float, default=0.0005)
     ap.add_argument('--notional', type=float, default=100.0, help='$ per trade')
-    ap.add_argument('--exit-mode', choices=['fixed', 'regime', 'always_trail'], default='always_trail', help='Exit strategy mode')
+    ap.add_argument('--exit-mode', choices=['fixed', 'regime', 'always_trail'], default='regime', help='Exit strategy mode')
     ap.add_argument('--interval', default='4h',
                     help="Timeframe suffix of the source CSVs (e.g. 4h, 1d). Default 4h.")
     ap.add_argument('--out-dir', default='data/model')

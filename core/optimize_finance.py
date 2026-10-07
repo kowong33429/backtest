@@ -30,8 +30,9 @@ def calculate_indicators(df):
     # FINANCE METRIC: Asset Volatility Profile (Risk Beta proxy)
     # ATR as a percentage of price tells us how "risky/explosive" this asset is
     df['ATR_Pct'] = (df['ATR'] / df['Close']) * 100 
-    df['ATR'] = df['ATR'].ffill().bfill()
-    df['ATR_Pct'] = df['ATR_Pct'].ffill().bfill()
+    # N-1 rule: forward-fill only (bfill would leak future warmup values backward).
+    df['ATR'] = df['ATR'].ffill()
+    df['ATR_Pct'] = df['ATR_Pct'].ffill()
     return df
 
 def simulate_finance_rotation(df, sig_dict, sl, horizon_bars, atr_mult, risk_on_only_high_beta, risk_off_only_bluechip, high_beta_threshold):
@@ -56,10 +57,12 @@ def simulate_finance_rotation(df, sig_dict, sl, horizon_bars, atr_mult, risk_on_
         
         entry_i = s + 1
         if entry_i >= len(df): continue
-        
+
+        # N-1 rule: econ regime and beta profile read from the signal candle (s).
         current_econ = econ_regime[s]
         asset_risk_profile = atr_pct[s]
-        
+        if not np.isfinite(asset_risk_profile): continue  # skip during warmup
+
         is_high_beta = asset_risk_profile > high_beta_threshold
         
         # FINANCE SECTOR ROTATION LOGIC:
@@ -74,7 +77,8 @@ def simulate_finance_rotation(df, sig_dict, sl, horizon_bars, atr_mult, risk_on_
 
         entry_px = o[entry_i]
         if entry_px <= 0 or not np.isfinite(entry_px): continue
-        
+        if not np.isfinite(atr[entry_i]): continue  # skip while ATR is still warming up
+
         end = min(entry_i + horizon_bars, len(df) - 1)
         fixed_dn = entry_px * (1 - sl)
         highest_seen = hi[entry_i]
@@ -95,37 +99,54 @@ def simulate_finance_rotation(df, sig_dict, sl, horizon_bars, atr_mult, risk_on_
         
     return total_net
 
-def objective(trial, sig, csvs, macro_df):
-    sl = trial.suggest_float('sl', 0.5, 0.8, step=0.1)
-    atr_mult = trial.suggest_float('atr_mult', 12.0, 18.0, step=1.0)
-    horizon_days = trial.suggest_int('horizon_days', 60, 120, step=15)
-    
-    # Finance Portfolio Rotation Flags
-    risk_on_only_high_beta = trial.suggest_categorical('risk_on_only_high_beta', [True, False])
-    risk_off_only_bluechip = trial.suggest_categorical('risk_off_only_bluechip', [True, False])
-    high_beta_threshold = trial.suggest_float('high_beta_threshold', 3.0, 8.0, step=1.0) # ATR % threshold
-    
+def evaluate_params(params, sig, csvs, macro_df):
+    """Run the full backtest for one parameter set over the given signal slice."""
+    sl = params['sl']
+    atr_mult = params['atr_mult']
+    risk_on_only_high_beta = params['risk_on_only_high_beta']
+    risk_off_only_bluechip = params['risk_off_only_bluechip']
+    high_beta_threshold = params['high_beta_threshold']
+    horizon_days = params['horizon_days']
+
     total_pnl = 0.0
-    
     for sym, grp in sig.groupby('symbol'):
         csv = csvs.get(sym)
         if csv is None: continue
-        
+
         df = pd.read_csv(csv)
         df['Date'] = pd.to_datetime(df['Date'])
-        
+
         df['Macro_Date'] = df['Date'].dt.normalize()
         df = pd.merge(df, macro_df[['Macro_Date', 'Econ_Risk_On']], on='Macro_Date', how='left')
         df['Econ_Risk_On'] = df['Econ_Risk_On'].ffill().fillna(0)
-        
+
         df = calculate_indicators(df)
         sig_dict = dict(zip(grp['Date'], grp['oof_prob_xgb']))
-        horizon_bars = horizon_days * 6 
-            
-        total_pnl += simulate_finance_rotation(df, sig_dict, sl, horizon_bars, atr_mult, 
+        horizon_bars = horizon_days * 6
+
+        total_pnl += simulate_finance_rotation(df, sig_dict, sl, horizon_bars, atr_mult,
                                                risk_on_only_high_beta, risk_off_only_bluechip, high_beta_threshold)
-        
+
     return total_pnl
+
+def objective(trial, sig, csvs, macro_df):
+    params = {
+        'sl': trial.suggest_float('sl', 0.5, 0.8, step=0.1),
+        'atr_mult': trial.suggest_float('atr_mult', 12.0, 18.0, step=1.0),
+        'horizon_days': trial.suggest_int('horizon_days', 60, 120, step=15),
+        # Finance Portfolio Rotation Flags
+        'risk_on_only_high_beta': trial.suggest_categorical('risk_on_only_high_beta', [True, False]),
+        'risk_off_only_bluechip': trial.suggest_categorical('risk_off_only_bluechip', [True, False]),
+        'high_beta_threshold': trial.suggest_float('high_beta_threshold', 3.0, 8.0, step=1.0), # ATR % threshold
+    }
+    return evaluate_params(params, sig, csvs, macro_df)
+
+
+def time_split(sig, frac=0.7):
+    """Chronological hold-out: earliest `frac` of signal dates train, the rest validate."""
+    dates_sorted = np.sort(sig['Date'].unique())
+    cutoff = pd.Timestamp(dates_sorted[int(len(dates_sorted) * frac)])
+    return sig[sig['Date'] <= cutoff], sig[sig['Date'] > cutoff], cutoff
 
 def main():
     print("="*60)
@@ -136,23 +157,31 @@ def main():
     oof = pd.read_parquet(os.path.join(base, 'data/model/v2/m1_100pct_60d/entry_oof.parquet'))
     oof['Date'] = pd.to_datetime(oof['Date'])
     sig = oof[oof['oof_prob_xgb'] >= 0.70]
-    
-    min_date = oof['Date'].min() - pd.Timedelta(days=365) 
+
+    # Chronological train/validation split: tune on the past, report on the unseen future.
+    sig_train, sig_valid, cutoff = time_split(sig, frac=0.7)
+    print(f"Train: {len(sig_train)} signals (<= {cutoff.date()}) | "
+          f"Validation: {len(sig_valid)} signals (> {cutoff.date()})")
+
+    min_date = oof['Date'].min() - pd.Timedelta(days=365)
     max_date = oof['Date'].max() + pd.Timedelta(days=30)
     macro_df = load_macro_data(min_date, max_date)
-    
+
     suffix = '_4h_full.csv'
     csvs = {os.path.basename(c).replace(suffix, '').upper(): c for c in glob.glob(os.path.join(base, 'data', '*', f'*{suffix}'))}
-            
+
     study = optuna.create_study(direction='maximize')
-    
-    print("AI is applying Traditional Finance 'Asset Rotation & Beta' strategies...")
-    study.optimize(lambda trial: objective(trial, sig, csvs, macro_df), n_trials=30, n_jobs=1)
-    
+
+    print("AI is applying Traditional Finance 'Asset Rotation & Beta' strategies (train slice)...")
+    study.optimize(lambda trial: objective(trial, sig_train, csvs, macro_df), n_trials=30, n_jobs=1)
+
+    val_pnl = evaluate_params(study.best_params, sig_valid, csvs, macro_df)
+
     print("\n" + "="*60)
     print(" AI OPTIMIZATION FINISHED")
     print("="*60)
-    print(f"Best PnL found: ${study.best_value:,.2f}")
+    print(f"IN-SAMPLE (train) best PnL:  ${study.best_value:,.2f}")
+    print(f"OUT-OF-SAMPLE (validation):  ${val_pnl:,.2f}")
     print("Best Parameters:")
     for key, value in study.best_params.items():
         print(f"  {key}: {value}")
