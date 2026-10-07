@@ -109,11 +109,11 @@
     "VIX",
     "HY_SPREAD"
   ],
-  "threshold": 0.9,
-  "pr_auc_xgb": 0.18662627045556462,
-  "pr_auc_lr": 0.14662475794971377,
-  "base_rate": 0.14379655465534547,
-  "scale_pos_weight": 5.946810603452516,
+  "threshold": 0.8,
+  "pr_auc_xgb": 0.17102955333404032,
+  "pr_auc_lr": 0.1460562482009562,
+  "base_rate": 0.14114844528766082,
+  "scale_pos_weight": 6.0761692081066,
   "n_splits": 6,
   "embargo_days": 3
 }

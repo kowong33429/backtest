@@ -27,11 +27,24 @@ import glob
 import argparse
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
 
-
-def simulate_coin(df, sig_dates, tp, sl, horizon_bars, fee, slip, notional):
-    """Walk one coin's bars; open at next Open on a signal, exit on TP/SL/time."""
+def simulate_coin(df, sig_dates, tp, sl, horizon_bars, fee, slip, notional, exit_mode='regime', atr_mult=6.0):
+    """Walk one coin's bars; open at next Open on a signal, exit based on exit_mode."""
     df = df.sort_values('Date').reset_index(drop=True)
+    
+    # Calculate indicators if regime mode is used
+    if exit_mode == 'regime':
+        df['ATR_14'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+        df['SMA_50'] = ta.sma(df['Close'], length=50)
+        df['SMA_200'] = ta.sma(df['Close'], length=200)
+        df['ATR_14'] = df['ATR_14'].ffill().bfill()
+        df['SMA_50'] = df['SMA_50'].ffill().bfill()
+        df['SMA_200'] = df['SMA_200'].ffill().bfill()
+        atr = df['ATR_14'].values
+        sma50 = df['SMA_50'].values
+        sma200 = df['SMA_200'].values
+    
     o, hi, lo, cl = (df['Open'].values, df['High'].values,
                      df['Low'].values, df['Close'].values)
     dt = df['Date'].values
@@ -49,21 +62,36 @@ def simulate_coin(df, sig_dates, tp, sl, horizon_bars, fee, slip, notional):
         entry_px = o[entry_i]
         if entry_px <= 0 or not np.isfinite(entry_px):
             continue
+            
         up, dn = entry_px * (1 + tp), entry_px * (1 - sl)
         end = min(entry_i + horizon_bars, len(df) - 1)
-
+        
         exit_i, exit_px, outcome = end, cl[end], 'TIME'
-        for j in range(entry_i, end + 1):
-            hit_dn, hit_up = lo[j] <= dn, hi[j] >= up
-            if hit_dn and hit_up:
-                exit_i, exit_px, outcome = j, dn, 'SL'       # conservative
-                break
-            if hit_dn:
-                exit_i, exit_px, outcome = j, dn, 'SL'
-                break
-            if hit_up:
-                exit_i, exit_px, outcome = j, up, 'TP'
-                break
+        highest_seen = hi[entry_i]
+        
+        if exit_mode == 'always_trail' or (exit_mode == 'regime' and sma50[entry_i] > sma200[entry_i]):
+            # UPTREND or ALWAYS_TRAIL -> Use Trailing Stop, No TP
+            for j in range(entry_i, end + 1):
+                highest_seen = max(highest_seen, hi[j])
+                current_atr_sl = highest_seen - (atr[j] * atr_mult)
+                current_sl = max(dn, current_atr_sl)
+                
+                if lo[j] <= current_sl:
+                    exit_i, exit_px, outcome = j, current_sl, 'TRAIL_SL'
+                    break
+        else:
+            # DOWNTREND or FIXED -> Use Fixed TP & SL
+            for j in range(entry_i, end + 1):
+                hit_dn, hit_up = lo[j] <= dn, hi[j] >= up
+                if hit_dn and hit_up:
+                    exit_i, exit_px, outcome = j, dn, 'SL'       # conservative
+                    break
+                if hit_dn:
+                    exit_i, exit_px, outcome = j, dn, 'SL'
+                    break
+                if hit_up:
+                    exit_i, exit_px, outcome = j, up, 'TP'
+                    break
 
         # Net return after costs on both sides.
         gross = exit_px / entry_px - 1.0
@@ -95,6 +123,7 @@ def main():
     ap.add_argument('--fee', type=float, default=0.001, help='fee per side (0.001=0.1%%)')
     ap.add_argument('--slippage', type=float, default=0.0005)
     ap.add_argument('--notional', type=float, default=100.0, help='$ per trade')
+    ap.add_argument('--exit-mode', choices=['fixed', 'regime', 'always_trail'], default='always_trail', help='Exit strategy mode')
     ap.add_argument('--interval', default='4h',
                     help="Timeframe suffix of the source CSVs (e.g. 4h, 1d). Default 4h.")
     ap.add_argument('--out-dir', default='data/model')
@@ -135,7 +164,7 @@ def main():
         df = pd.read_csv(csv)
         df['Date'] = pd.to_datetime(df['Date'])
         tr = simulate_coin(df, set(grp['Date']), args.tp, args.sl, horizon_bars,
-                           args.fee, args.slippage, args.notional)
+                           args.fee, args.slippage, args.notional, exit_mode=args.exit_mode)
         for t in tr:
             t['symbol'] = sym
         all_trades.extend(tr)
