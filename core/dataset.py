@@ -34,6 +34,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from features import FeatureEngineer           # noqa: E402
 from labeler import EntryLabeler               # noqa: E402
+from labeler_short import ShortEntryLabeler     # noqa: E402
 from entry_finder import MacroSnapshot, fetch_fear_greed, fg_at  # noqa: E402
 
 
@@ -104,7 +105,7 @@ def discover_coins(base_dir, basket_json=None, symbols=None, interval='4h'):
 # Per-coin build
 # ----------------------------------------------------------------------------
 def build_coin(symbol, csv_path, macro, fg, tp_pct, sl_pct, horizon_days,
-               min_rows=1500):
+               min_rows=1500, direction='long', no_new_high_bars=0, below_ema=0):
     df = pd.read_csv(csv_path)
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values('Date').reset_index(drop=True)
@@ -116,9 +117,17 @@ def build_coin(symbol, csv_path, macro, fg, tp_pct, sl_pct, horizon_days,
     bpd = max(1, round(pd.Timedelta(days=1) / med))
 
     # 1) Labels on the FULL series: forward triple-barrier (needs future highs/
-    #    lows; labeler.py), emitting Entry_Label/Label_EndDate/Sample_Weight.
-    lab = EntryLabeler(df, tp_pct=tp_pct, sl_pct=sl_pct,
-                       horizon_days=horizon_days, bars_per_day=bpd).generate()
+    #    lows; labeler.py / labeler_short.py), emitting Entry_Label/Label_EndDate/
+    #    Sample_Weight. direction='short' mirrors the barriers (TP = price down,
+    #    SL = price up) — see labeler_short.ShortEntryLabeler.
+    if direction == 'short':
+        lab = ShortEntryLabeler(df, tp_pct=tp_pct, sl_pct=sl_pct,
+                                horizon_days=horizon_days, bars_per_day=bpd,
+                                no_new_high_bars=no_new_high_bars,
+                                below_ema=below_ema).generate()
+    else:
+        lab = EntryLabeler(df, tp_pct=tp_pct, sl_pct=sl_pct,
+                           horizon_days=horizon_days, bars_per_day=bpd).generate()
     lab = lab[['Date', 'Entry_Label', 'Label_EndDate', 'Sample_Weight']]
 
     # 2) Features (strict n-1 shift applied inside FeatureEngineer). Time-based
@@ -167,6 +176,16 @@ def main():
     ap.add_argument('--sl', type=float, default=0.40, help='SL fraction (default 0.40=-40%%)')
     ap.add_argument('--horizon-days', type=int, default=30,
                     help='forward horizon (days) to reach the TP before the SL')
+    ap.add_argument('--direction', default='long', choices=['long', 'short'],
+                    help="'long' = EntryLabeler (price UP tp before DOWN sl); "
+                         "'short' = ShortEntryLabeler (price DOWN to +tp%% profit "
+                         "before UP to -sl%% loss). Default long.")
+    ap.add_argument('--no-new-high-bars', type=int, default=0,
+                    help="SHORT only (stricter label): a positive short must NOT "
+                         "be a new high over the prior N bars. 0 = off (baseline).")
+    ap.add_argument('--below-ema', type=int, default=0,
+                    help="SHORT only (stricter label): a positive short must have "
+                         "Close below its EMA(span) of Close, e.g. 6. 0 = off.")
     ap.add_argument('--interval', default='4h',
                     help="Timeframe suffix of the source CSVs (e.g. 4h, 1d). Default 4h.")
     ap.add_argument('--min-rows', type=int, default=1500,
@@ -182,7 +201,8 @@ def main():
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     pairs = discover_coins(base_dir, basket_json, args.symbols, interval=args.interval)
-    label_desc = f"ENTRY +{args.tp*100:.0f}%/{args.horizon_days}d/-{args.sl*100:.0f}%"
+    label_desc = (f"{args.direction.upper()} ENTRY +{args.tp*100:.0f}%/"
+                  f"{args.horizon_days}d/-{args.sl*100:.0f}%")
     print(f"[Dataset] Building panel from {len(pairs)} coins "
           f"(interval={args.interval}, label {label_desc})")
     if not pairs:
@@ -209,7 +229,9 @@ def main():
         print(f"[{k}/{len(pairs)}] {sym}")
         try:
             m = build_coin(sym, csv, macro, fg, args.tp, args.sl, args.horizon_days,
-                           min_rows=args.min_rows)
+                           min_rows=args.min_rows, direction=args.direction,
+                           no_new_high_bars=args.no_new_high_bars,
+                           below_ema=args.below_ema)
             if m is not None:
                 frames.append(m)
         except Exception as e:
