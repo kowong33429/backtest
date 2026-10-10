@@ -49,11 +49,10 @@ SCALE_FREE_PREFIXES = (
     'BB_Width_',       # (upper-lower)/sma ratio (also BB_Width_*_Lag1)
     'Dist_SMA_',       # (close-sma)/sma ratio
     'Return_',         # pct_change (also Return_1/2 and _Lag1)
-    'Dist_Low_',       # (close-low)/low ratio
-    'Dist_High_',      # (close-high)/high ratio
     'Volume_Surge_',   # volume / rolling-avg volume ratio
-    'Pos_In_',         # 0-1 position within range
-    'Dist_VWAP_',      # (close-vwap)/vwap ratio
+    'Dist_Donchian_Mid_',
+    'Donchian_Width_',
+    'Bar_Donchian_Frac_',
 )
 SCALE_FREE_EXACT = {'SMA_Cross', 'ATR_Ratio'}
 # Explicitly DROPPED (absolute units -> not comparable across coins):
@@ -105,7 +104,8 @@ def discover_coins(base_dir, basket_json=None, symbols=None, interval='4h'):
 # Per-coin build
 # ----------------------------------------------------------------------------
 def build_coin(symbol, csv_path, macro, fg, tp_pct, sl_pct, horizon_days,
-               min_rows=1500, direction='long', no_new_high_bars=0, below_ema=0):
+               min_rows=1500, direction='long', no_new_high_bars=0, below_ema=0,
+               below_donchian_mid=0, max_bar_channel_frac=0.0):
     df = pd.read_csv(csv_path)
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values('Date').reset_index(drop=True)
@@ -124,7 +124,9 @@ def build_coin(symbol, csv_path, macro, fg, tp_pct, sl_pct, horizon_days,
         lab = ShortEntryLabeler(df, tp_pct=tp_pct, sl_pct=sl_pct,
                                 horizon_days=horizon_days, bars_per_day=bpd,
                                 no_new_high_bars=no_new_high_bars,
-                                below_ema=below_ema).generate()
+                                below_ema=below_ema,
+                                below_donchian_mid=below_donchian_mid,
+                                max_bar_channel_frac=max_bar_channel_frac).generate()
     else:
         lab = EntryLabeler(df, tp_pct=tp_pct, sl_pct=sl_pct,
                            horizon_days=horizon_days, bars_per_day=bpd).generate()
@@ -186,6 +188,14 @@ def main():
     ap.add_argument('--below-ema', type=int, default=0,
                     help="SHORT only (stricter label): a positive short must have "
                          "Close below its EMA(span) of Close, e.g. 6. 0 = off.")
+    ap.add_argument('--below-donchian-mid', type=int, default=0,
+                    help="SHORT only (stricter label): previous bar's Close must be "
+                         "below the N-bar Donchian midline (channel over [i-N, i-1]), "
+                         "e.g. 20. 0 = off.")
+    ap.add_argument('--max-bar-channel-frac', type=float, default=0.0,
+                    help="SHORT only, with --below-donchian-mid: veto if bar i-1's "
+                         "High-Low >= this fraction of the Donchian width, e.g. 0.7. "
+                         "0 = off.")
     ap.add_argument('--interval', default='4h',
                     help="Timeframe suffix of the source CSVs (e.g. 4h, 1d). Default 4h.")
     ap.add_argument('--min-rows', type=int, default=1500,
@@ -231,7 +241,9 @@ def main():
             m = build_coin(sym, csv, macro, fg, args.tp, args.sl, args.horizon_days,
                            min_rows=args.min_rows, direction=args.direction,
                            no_new_high_bars=args.no_new_high_bars,
-                           below_ema=args.below_ema)
+                           below_ema=args.below_ema,
+                           below_donchian_mid=args.below_donchian_mid,
+                           max_bar_channel_frac=args.max_bar_channel_frac)
             if m is not None:
                 frames.append(m)
         except Exception as e:

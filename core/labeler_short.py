@@ -47,7 +47,8 @@ import pandas as pd
 
 class ShortEntryLabeler:
     def __init__(self, df, tp_pct=1.00, sl_pct=0.40, horizon_days=60,
-                 bars_per_day=None, no_new_high_bars=0, below_ema=0):
+                 bars_per_day=None, no_new_high_bars=0, below_ema=0,
+                 below_donchian_mid=0, max_bar_channel_frac=0.0):
         """
         Parameters
         ----------
@@ -70,6 +71,17 @@ class ShortEntryLabeler:
                  BELOW its `below_ema`-span EMA of Close (e.g. 6). Marks only
                  entries where short-term momentum has already rolled below the
                  fast EMA — not bars still bouncing above it. 0 = off.
+        below_donchian_mid : if > 0, a positive short must have the PREVIOUS bar's
+                 Close (i-1) below the midline of the N-bar Donchian channel
+                 computed over [i-N, i-1]: mid = (max(High) + min(Low)) / 2.
+                 Uses only data known at the Open[i] decision (N-1 rule), so the
+                 label never rewards info the model cannot see. 0 = off.
+        max_bar_channel_frac : only used with below_donchian_mid > 0. Veto a
+                 positive when the PREVIOUS bar's range (High[i-1]-Low[i-1])
+                 is >= this fraction of the Donchian channel width over
+                 [i-N, i-1] (e.g. 0.7). Such a bar alone spans almost the whole
+                 channel (a single spike/crash candle), so 'below the midline'
+                 says nothing about structure. 0 = off.
         """
         self.df = df.reset_index(drop=True)
         self.tp_pct = tp_pct
@@ -77,6 +89,8 @@ class ShortEntryLabeler:
         self.horizon_days = horizon_days
         self.no_new_high_bars = int(no_new_high_bars)
         self.below_ema = int(below_ema)
+        self.below_donchian_mid = int(below_donchian_mid)
+        self.max_bar_channel_frac = float(max_bar_channel_frac)
         if bars_per_day is None:
             med = pd.to_datetime(self.df['Date']).diff().median()
             bars_per_day = max(1, round(pd.Timedelta(days=1) / med))
@@ -120,6 +134,25 @@ class ShortEntryLabeler:
         else:
             below_ok = None
 
+        # Donchian-midline veto (bar i-1): channel over [i-N, i-1], compare to
+        # Close[i-1]. Both sides shifted by 1 -> strictly past data at Open[i].
+        D = self.below_donchian_mid
+        if D > 0:
+            hh = pd.Series(hi).rolling(D, min_periods=D).max()
+            ll = pd.Series(lo).rolling(D, min_periods=D).min()
+            mid_prev = ((hh + ll) / 2.0).shift(1).values
+            cl_prev = pd.Series(cl).shift(1).values
+            don_ok = np.isfinite(mid_prev) & (cl_prev < mid_prev)
+            # Giant-candle veto: bar i-1 alone spans most of the channel width.
+            if self.max_bar_channel_frac > 0:
+                width_prev = (hh - ll).shift(1).values
+                rng_prev = pd.Series(hi - lo).shift(1).values
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    frac = np.where(width_prev > 0, rng_prev / width_prev, 1.0)
+                don_ok &= frac < self.max_bar_channel_frac
+        else:
+            don_ok = None
+
         for i in range(n - 1):
             entry = o[i]
             if entry <= 0 or not np.isfinite(entry):
@@ -155,6 +188,9 @@ class ShortEntryLabeler:
                     hit = 0
             # below_ema veto: price must already be below its fast EMA.
             if hit == 1 and below_ok is not None and not below_ok[i]:
+                hit = 0
+            # Donchian veto: prior bar must close in the lower half of the channel.
+            if hit == 1 and don_ok is not None and not don_ok[i]:
                 hit = 0
             label[i] = hit
             end_idx[i] = touched_at
@@ -201,6 +237,11 @@ class ShortEntryLabeler:
         strict = (f" | STRICT: no new high in prior {self.no_new_high_bars} bars"
                   if self.no_new_high_bars > 0 else "")
         strict += (f" | Close<EMA{self.below_ema}" if self.below_ema > 0 else "")
+        strict += (f" | Close[i-1]<DonchianMid{self.below_donchian_mid}"
+                   if self.below_donchian_mid > 0 else "")
+        strict += (f" | bar[i-1] range < {self.max_bar_channel_frac:.2f}x channel"
+                   if self.below_donchian_mid > 0 and self.max_bar_channel_frac > 0
+                   else "")
         print(f"[ShortLabeler] SHORT +{self.tp_pct*100:.0f}%/{self.horizon_days}d "
               f"stop -{self.sl_pct*100:.0f}% (price x{1/(1+self.tp_pct):.3f} down "
               f"before x{1/(1-self.sl_pct):.3f} up){strict}: "

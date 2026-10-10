@@ -27,6 +27,7 @@ SMA_LENGTHS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 200] # keep 50 & 200 (SM
 # [1, 3, 7, 15, 30, 90, 180, 365] (and HL: [30, 90, 180, 365]).
 TIME_WINDOWS_DAYS = [1, 3, 7, 15, 30, 90, 180, 365]  # returns / pos-in-range / VWAP distance
 DIST_HL_DAYS = [30, 90, 180, 365]                    # distance from 1M/3M/6M/1Y High & Low
+DONCHIAN_LENGTHS = [20, 40, 60, 120]                 # explicit Donchian channel features
 
 
 class FeatureEngineer:
@@ -171,12 +172,36 @@ class FeatureEngineer:
 
         return self.df
 
+    def add_donchian_features(self):
+        print("Adding Explicit Donchian Channel Features...")
+        # Add exact Donchian filter metrics the short labeler uses, so the model
+        # can natively learn to avoid "price above midline" or "giant candle".
+        for length in DONCHIAN_LENGTHS:
+            hh = self.df['High'].rolling(window=length, min_periods=length).max()
+            ll = self.df['Low'].rolling(window=length, min_periods=length).min()
+            mid = (hh + ll) / 2.0
+            
+            # 1. Distance to Midline (positive = above mid, negative = below mid)
+            self.df[f'Dist_Donchian_Mid_{length}'] = (self.df['Close'] - mid) / (mid + 1e-9)
+            
+            # 2. Channel Width (normalized by price)
+            chan_width = hh - ll
+            self.df[f'Donchian_Width_{length}'] = chan_width / (self.df['Close'] + 1e-9)
+            
+            # 3. Bar Range vs Channel Width Fraction
+            bar_range = self.df['High'] - self.df['Low']
+            frac = np.where(chan_width > 0, bar_range / chan_width, 1.0)
+            self.df[f'Bar_Donchian_Frac_{length}'] = pd.Series(frac, index=self.df.index)
+
+        return self.df
+
     def generate_all_features(self):
         self.add_technical_indicators()
         self.add_trend_features()
         self.add_lagged_features()
         self.add_mtf_context()
         self.add_microstructure_features()
+        self.add_donchian_features()
 
         # STRICT ANTI-LEAKAGE RULE (AGENTS.md Rule #1 — No Lookahead Bias)
         # Shift all calculated features by 1 so that at bar T the model only sees

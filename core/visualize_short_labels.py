@@ -15,6 +15,8 @@ What you should SEE if labels are correct (OPPOSITE of the long model):
 Usage:
     python core/visualize_short_labels.py --csv data/zecusdt/ZECUSDT_4h_full.csv
     python core/visualize_short_labels.py --csv ... --tp 1.0 --sl 0.4 --horizon-days 60
+    # same label as the short_ema6 panel (Close<EMA6 veto); grey = vetoed positives
+    python core/visualize_short_labels.py --csv ... --below-ema 6
 """
 import os
 import sys
@@ -33,6 +35,15 @@ def main():
     ap.add_argument('--tp', type=float, default=1.00)
     ap.add_argument('--sl', type=float, default=0.40)
     ap.add_argument('--horizon-days', type=int, default=60)
+    ap.add_argument('--below-ema', type=int, default=0,
+                    help='Stricter label: positive must have Close < EMA(span). 0 = off.')
+    ap.add_argument('--no-new-high-bars', type=int, default=0,
+                    help='Stricter label: positive must not be a new N-bar high. 0 = off.')
+    ap.add_argument('--below-donchian-mid', type=int, default=0,
+                    help='Stricter label: Close[i-1] < N-bar Donchian midline. 0 = off.')
+    ap.add_argument('--max-bar-channel-frac', type=float, default=0.0,
+                    help="With --below-donchian-mid: veto if bar i-1 range >= frac x "
+                         "channel width (e.g. 0.7). 0 = off.")
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
 
@@ -44,9 +55,23 @@ def main():
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values('Date').reset_index(drop=True)
 
+    strict = (args.below_ema > 0 or args.no_new_high_bars > 0
+              or args.below_donchian_mid > 0)
     lab = ShortEntryLabeler(df, tp_pct=args.tp, sl_pct=args.sl,
-                            horizon_days=args.horizon_days).generate()
+                            horizon_days=args.horizon_days,
+                            no_new_high_bars=args.no_new_high_bars,
+                            below_ema=args.below_ema,
+                            below_donchian_mid=args.below_donchian_mid,
+                            max_bar_channel_frac=args.max_bar_channel_frac).generate()
     pos = lab[lab['Entry_Label'] == 1]
+    # Baseline (no veto) positives that the strict filter removed -> drawn grey.
+    vetoed = lab.iloc[0:0]
+    if strict:
+        base = ShortEntryLabeler(df, tp_pct=args.tp, sl_pct=args.sl,
+                                 horizon_days=args.horizon_days).generate()
+        vetoed = lab[(base['Entry_Label'].values == 1) & (lab['Entry_Label'].values == 0)]
+        print(f"[Filter] baseline {int(base['Entry_Label'].sum())} positives -> "
+              f"kept {len(pos)}, vetoed {len(vetoed)}")
 
     tp_mult = 1.0 / (1 + args.tp)   # price multiplier at the short TP (down)
     sl_mult = 1.0 / (1 - args.sl)   # price multiplier at the short SL (up)
@@ -64,7 +89,25 @@ def main():
         print(f"  {str(pd.Timestamp(r['Date'])):<20}{e:>12.4g}{e*tp_mult:>12.4g}"
               f"{str(rd):<22}{days:>5}{args.tp*100:>12.0f}%")
 
-    out = args.out or os.path.join(os.path.dirname(csv_path), 'label_check_short.html')
+    suffix = ''
+    if args.below_ema > 0:
+        suffix += f'_ema{args.below_ema}'
+    if args.no_new_high_bars > 0:
+        suffix += f'_nnh{args.no_new_high_bars}'
+    if args.below_donchian_mid > 0:
+        suffix += f'_don{args.below_donchian_mid}'
+        if args.max_bar_channel_frac > 0:
+            suffix += f'_bf{int(round(args.max_bar_channel_frac * 100))}'
+    out = args.out or os.path.join(os.path.dirname(csv_path), f'label_check_short{suffix}.html')
+    filt = ''
+    if args.below_ema > 0:
+        filt += f' + Close<EMA{args.below_ema}'
+    if args.no_new_high_bars > 0:
+        filt += f' + no new {args.no_new_high_bars}-bar high'
+    if args.below_donchian_mid > 0:
+        filt += f' + Close[i-1]<Donchian{args.below_donchian_mid} mid'
+        if args.max_bar_channel_frac > 0:
+            filt += f' + bar[i-1] range<{args.max_bar_channel_frac:.2f}x width'
 
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -74,15 +117,43 @@ def main():
                             f"{sym} — red = positive SHORT label "
                             f"(price x{tp_mult:.2f} [+{args.tp*100:.0f}%] before "
                             f"x{sl_mult:.2f} [-{args.sl*100:.0f}%] within "
-                            f"{args.horizon_days}d)", "Volume"))
+                            f"{args.horizon_days}d{filt})"
+                            + (" | grey = vetoed by filter" if strict else ""), "Volume"))
 
-    fig.add_trace(go.Scatter(x=lab['Date'], y=lab['Close'], mode='lines',
-                             line=dict(color='#5b6b7b', width=1), name='Close'),
-                  row=1, col=1)
-    fig.add_trace(go.Scatter(x=pos['Date'], y=pos['Open'], mode='markers',
-                             marker=dict(symbol='triangle-down', size=6, color='red',
+    if strict:
+        fig.add_trace(go.Candlestick(x=lab['Date'], open=lab['Open'], high=lab['High'],
+                                     low=lab['Low'], close=lab['Close'], name='OHLC',
+                                     increasing_line_color='#26a69a',
+                                     decreasing_line_color='#ef5350',
+                                     line=dict(width=1)), row=1, col=1)
+    else:
+        fig.add_trace(go.Scatter(x=lab['Date'], y=lab['Close'], mode='lines',
+                                 line=dict(color='#5b6b7b', width=1), name='Close'),
+                      row=1, col=1)
+    if args.below_ema > 0:
+        ema = lab['Close'].ewm(span=args.below_ema, adjust=False).mean()
+        fig.add_trace(go.Scatter(x=lab['Date'], y=ema, mode='lines',
+                                 line=dict(color='#f0b429', width=1.2),
+                                 name=f'EMA{args.below_ema}'), row=1, col=1)
+    if args.below_donchian_mid > 0:
+        N = args.below_donchian_mid
+        hh = lab['High'].rolling(N, min_periods=N).max()
+        ll = lab['Low'].rolling(N, min_periods=N).min()
+        for y, nm, st in [(hh, f'Donchian{N} upper', 'dot'),
+                          ((hh + ll) / 2, f'Donchian{N} mid', 'solid'),
+                          (ll, f'Donchian{N} lower', 'dot')]:
+            fig.add_trace(go.Scatter(x=lab['Date'], y=y, mode='lines',
+                                     line=dict(color='#58a6ff', width=1, dash=st),
+                                     name=nm), row=1, col=1)
+    if len(vetoed):
+        fig.add_trace(go.Scatter(x=vetoed['Date'], y=vetoed['High'] * 1.03, mode='markers',
+                                 marker=dict(symbol='x', size=5, color='#8b949e'),
+                                 name=f'Vetoed by filter ({len(vetoed)})'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=pos['Date'], y=pos['High'] * 1.06 if strict else pos['Open'],
+                             mode='markers',
+                             marker=dict(symbol='triangle-down', size=7, color='red',
                                          line=dict(width=0)),
-                             name='Short Entry_Label=1'), row=1, col=1)
+                             name=f'Short Entry_Label=1 ({len(pos)})'), row=1, col=1)
     if 'Volume' in lab.columns:
         fig.add_trace(go.Bar(x=lab['Date'], y=lab['Volume'], marker_color='#30363d',
                              name='Volume'), row=2, col=1)
