@@ -102,6 +102,14 @@ def main():
     ap.add_argument('--corr-filter', action='store_true',
                     help='Drop >0.75-correlated features (AGENTS.md Rule #4)')
     ap.add_argument('--no-shap', action='store_true')
+    # XGBoost capacity. Defaults = original config. For the SHORT panel the OOS
+    # backtest favoured --n-estimators 600 --max-depth 5 --min-child-weight 50
+    # --colsample 0.5 (column subsampling stops the trees leaning only on macro).
+    ap.add_argument('--n-estimators', type=int, default=300)
+    ap.add_argument('--max-depth', type=int, default=4)
+    ap.add_argument('--min-child-weight', type=float, default=1.0)
+    ap.add_argument('--colsample', type=float, default=0.8, help='colsample_bytree')
+    ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--out-dir', default='data/model')
     args = ap.parse_args()
 
@@ -140,6 +148,12 @@ def main():
     from sklearn.preprocessing import StandardScaler
 
     scale_pos = max(1.0, (len(y) - y.sum()) / max(1, y.sum()))
+    xgb_params = dict(n_estimators=args.n_estimators, learning_rate=0.03,
+                      max_depth=args.max_depth, min_child_weight=args.min_child_weight,
+                      subsample=0.8, colsample_bytree=args.colsample,
+                      scale_pos_weight=scale_pos, random_state=args.seed,
+                      n_jobs=4, verbosity=0, eval_metric='aucpr')
+    print(f"[XGB] {xgb_params}")
     oof_xgb = np.full(len(y), np.nan)
     oof_lr = np.full(len(y), np.nan)
     fold_rows = []
@@ -156,10 +170,7 @@ def main():
             continue
 
         # --- XGBoost ---
-        xgb = XGBClassifier(n_estimators=300, learning_rate=0.03, max_depth=4,
-                            subsample=0.8, colsample_bytree=0.8,
-                            scale_pos_weight=scale_pos, random_state=42,
-                            n_jobs=4, verbosity=0, eval_metric='aucpr')
+        xgb = XGBClassifier(**xgb_params)
         xgb.fit(Xtr, ytr, sample_weight=wtr)
         oof_xgb[te] = xgb.predict_proba(Xte)[:, 1]
 
@@ -200,10 +211,7 @@ def main():
 
     # --- Final model on ALL data (for live inference) ---
     print("\n[Final] Refitting XGBoost on ALL data for live inference...")
-    final = XGBClassifier(n_estimators=300, learning_rate=0.03, max_depth=4,
-                          subsample=0.8, colsample_bytree=0.8,
-                          scale_pos_weight=scale_pos, random_state=42,
-                          n_jobs=4, verbosity=0, eval_metric='aucpr')
+    final = XGBClassifier(**xgb_params)
     final.fit(X, y, sample_weight=w)
     model_path = os.path.join(out_dir, 'entry_xgb.json')
     final.save_model(model_path)
@@ -216,7 +224,8 @@ def main():
     meta = {'features': feat_cols, 'threshold': best_t,
             'pr_auc_xgb': float(ap_x), 'pr_auc_lr': float(ap_l),
             'base_rate': float(yv.mean()), 'scale_pos_weight': float(scale_pos),
-            'n_splits': args.n_splits, 'embargo_days': args.embargo_days}
+            'n_splits': args.n_splits, 'embargo_days': args.embargo_days,
+            'xgb_params': xgb_params}
     with open(os.path.join(out_dir, 'entry_model_meta.json'), 'w') as f:
         json.dump(meta, f, indent=2)
     # Persist pooled OOF probabilities for inspection / backtesting.

@@ -50,11 +50,14 @@ def compute_trend_ok(df, lookback, pullback):
 
 
 def simulate_coin_short(df, sig_dates, tp, sl, horizon_bars, fee, slip, notional,
-                        trend_ok=None):
+                        trend_ok=None, sl_cooldown_bars=0):
     """Walk one coin's bars; SHORT at next Open on a signal, cover on TP/SL/time.
 
     trend_ok : optional bool array aligned to df positions; when given, a signal
                at bar s is SKIPPED unless trend_ok[s] is True (variant-1 filter).
+    sl_cooldown_bars : after a short is STOPPED OUT, block new shorts on this coin
+               for this many extra bars (stops re-shorting a parabola that just
+               squeezed us). Uses only the past exit, so no look-ahead.
     """
     df = df.sort_values('Date').reset_index(drop=True)
     o, hi, lo, cl = (df['Open'].values, df['High'].values,
@@ -109,6 +112,8 @@ def simulate_coin_short(df, sig_dates, tp, sl, horizon_bars, fee, slip, notional
             'pnl_usd': float(net * notional),
         })
         cooldown_until = exit_i  # no re-entry until this short closes
+        if outcome == 'SL':
+            cooldown_until += sl_cooldown_bars
     return trades
 
 
@@ -157,6 +162,8 @@ def main():
                     help='bars for the trailing-high window of the trend filter')
     ap.add_argument('--trend-pullback', type=float, default=0.10,
                     help='required pullback from the trailing high to allow a short')
+    ap.add_argument('--sl-cooldown-days', type=float, default=0.0,
+                    help='after a stop-loss, skip new shorts on that coin for N days')
     ap.add_argument('--out-dir', default='data/model/short')
     args = ap.parse_args()
 
@@ -192,6 +199,10 @@ def main():
         print(f"  TREND FILTER ON: short only if price <= {(1-args.trend_pullback)*100:.0f}% "
               f"of its trailing {args.trend_lookback}-bar high "
               f"(pullback >= {args.trend_pullback*100:.0f}%)")
+    sl_cooldown_bars = int(round(args.sl_cooldown_days * bpd))
+    if sl_cooldown_bars > 0:
+        print(f"  SL COOLDOWN ON: after a stop-out, no new short on that coin for "
+              f"{args.sl_cooldown_days:g} days ({sl_cooldown_bars} bars)")
 
     # Pre-load each coin's OHLCV once (reused across all thresholds).
     coin_df, coin_trend = {}, {}
@@ -215,7 +226,8 @@ def main():
                 continue
             tr = simulate_coin_short(coin_df[sym], set(grp['Date']), args.tp, args.sl,
                                      horizon_bars, args.fee, args.slippage, args.notional,
-                                     trend_ok=coin_trend.get(sym))
+                                     trend_ok=coin_trend.get(sym),
+                                     sl_cooldown_bars=sl_cooldown_bars)
             for t in tr:
                 t['symbol'] = sym
             all_trades.extend(tr)

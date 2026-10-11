@@ -14,6 +14,7 @@ Usage:
     python core/plot_train_entries.py
     python core/plot_train_entries.py --symbols FETUSDT ZECUSDT DOGEUSDT
     python core/plot_train_entries.py --min-pos 50 --out data/model/entry_labels_viz.html
+    python core/plot_train_entries.py --sort name   # alphabetical dropdown
 """
 import os
 import sys
@@ -40,6 +41,8 @@ def main():
                     help='Only these symbols (default: all in panel)')
     ap.add_argument('--min-pos', type=int, default=1,
                     help='Skip coins with fewer than this many positive labels')
+    ap.add_argument('--sort', default='pos', choices=['pos', 'name'],
+                    help='Dropdown order: pos = most positives first, name = alphabetical')
     ap.add_argument('--out', default='data/model/entry_labels_viz.html')
     args = ap.parse_args()
 
@@ -56,6 +59,8 @@ def main():
     # Per-coin positive counts; order coins by most positives first.
     counts = (panel.groupby('symbol')['Entry_Label']
               .agg(n='size', pos='sum').sort_values('pos', ascending=False))
+    if args.sort == 'name':
+        counts = counts.sort_index()
     want = [s.upper() for s in args.symbols] if args.symbols else list(counts.index)
 
     import plotly.graph_objects as go

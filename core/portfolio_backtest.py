@@ -14,6 +14,20 @@ RULES (same signal/exit as entry_backtest.py, AGENTS.md Rule #1)
   Sizing   : alloc_frac of current equity (cash + open cost basis), capped by
              free cash; skip if the affordable size < min_trade. Compounding.
   Costs    : fee + slippage on both sides.
+
+EXIT MODES (all simulated by exits.resolve_long, same engine as entry_backtest.py):
+barrier (above), trailing, and short / model: no fixed TP, hard SL (--sl, alias
+--init-sl), exit when the exit-signal prob (short model or exit model) >= --exit-thr
+AND price is >= --min-dd below the trade peak.
+
+DRAWDOWN: besides the realized curve (equity only moves when a trade closes), a
+daily MARK-TO-MARKET curve is reported — open positions valued at each day's last
+4H Close. With long holds (months) the realized max-DD badly understates the real
+pain; the MTM figure is the one to size the account on.
+
+    python core/portfolio_backtest.py --oof data/model/v2/m1_100pct_60d/entry_oof.parquet \
+        --threshold 0.8 --exit-mode short --exit-probs data/model/short_v2/entry_oof.parquet \
+        --exit-thr 0.5 --min-dd 0.20 --horizon-days 365 --out-dir data/model/v2/m1_short_exit
 """
 import os
 import sys
@@ -21,6 +35,9 @@ import glob
 import argparse
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from exits import resolve_long, load_exit_probs, align_probs  # noqa: E402
 
 
 def coin_arrays(csv):
@@ -32,65 +49,22 @@ def coin_arrays(csv):
             {d: i for i, d in enumerate(df['Date'].values)})
 
 
-def resolve_trade(o, hi, lo, cl, dt, s, cfg, horizon_bars, fee, slip):
-    """
-    Given a signal at bar s, simulate the trade and return
-    (entry_date, exit_date, net_ret, outcome).
-
-    cfg['mode'] == 'barrier'  -> fixed TP (+tp) / SL (-sl) / time stop.
-    cfg['mode'] == 'trailing' -> no fixed TP; exit when price falls `trail` below
-                                 the running peak High, floored by a hard -init_sl
-                                 stop. Lets winners run (captures the full rally).
-    """
-    entry_i = s + 1
-    if entry_i >= len(o):
-        return None
-    entry_px = o[entry_i]
-    if entry_px <= 0 or not np.isfinite(entry_px):
-        return None
-    end = min(entry_i + horizon_bars, len(o) - 1)
-
-    if cfg['mode'] == 'barrier':
-        up, dn = entry_px * (1 + cfg['tp']), entry_px * (1 - cfg['sl'])
-        exit_i, exit_px, outcome = end, cl[end], 'TIME'
-        for j in range(entry_i, end + 1):
-            if lo[j] <= dn:
-                exit_i, exit_px, outcome = j, dn, 'SL'
-                break
-            if hi[j] >= up:
-                exit_i, exit_px, outcome = j, up, 'TP'
-                break
-    else:  # trailing
-        hard = entry_px * (1 - cfg['init_sl'])
-        activate = entry_px * (1 + cfg['activate'])   # trail only once this profit is reached
-        peak = entry_px
-        armed = cfg['activate'] <= 0
-        exit_i, exit_px, outcome = end, cl[end], 'TIME'
-        for j in range(entry_i, end + 1):
-            peak = max(peak, hi[j])
-            if hi[j] >= activate:
-                armed = True
-            stop = max(hard, peak * (1 - cfg['trail'])) if armed else hard
-            if lo[j] <= stop:
-                exit_i, exit_px = j, stop
-                outcome = 'TRAIL' if (armed and stop > hard) else 'STOP'
-                break
-
-    net = (exit_px / entry_px - 1.0) - 2 * (fee + slip)
-    return (pd.Timestamp(dt[entry_i]), pd.Timestamp(dt[exit_i]), float(net), outcome)
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--oof', default='data/model/entry_oof.parquet')
     ap.add_argument('--prob-col', default='oof_prob_xgb')
     ap.add_argument('--threshold', type=float, default=0.70)
-    ap.add_argument('--exit-mode', choices=['barrier', 'trailing'], default='barrier')
+    ap.add_argument('--exit-mode', choices=['barrier', 'trailing', 'short', 'model'], default='barrier')
+    ap.add_argument('--exit-probs', default=None, help='short/model: OOF parquet of the exit signal')
+    ap.add_argument('--exit-prob-col', default='oof_prob_xgb')
+    ap.add_argument('--exit-thr', type=float, default=0.5)
+    ap.add_argument('--min-dd', type=float, default=0.20)
     ap.add_argument('--tp', type=float, default=1.00, help='barrier mode: take profit')
-    ap.add_argument('--sl', type=float, default=0.40, help='barrier mode: stop loss')
-    ap.add_argument('--trail', type=float, default=0.25, help='trailing mode: % below peak')
-    ap.add_argument('--init-sl', type=float, default=0.40, help='trailing mode: hard stop floor')
-    ap.add_argument('--activate', type=float, default=0.0, help='trailing mode: arm trail only after +this profit')
+    ap.add_argument('--sl', '--init-sl', dest='sl', type=float, default=0.40,
+                    help='stop loss (barrier) / hard stop floor (other modes)')
+    ap.add_argument('--trail', type=float, default=None,
+                    help='trailing stop below the peak (default: 0.25 in trailing mode, off otherwise)')
+    ap.add_argument('--activate', type=float, default=0.0, help='arm the trail only after +this profit')
     ap.add_argument('--horizon-days', type=int, default=30, help='time cap (barrier=30; trailing can be larger)')
     ap.add_argument('--initial-equity', type=float, default=10000.0)
     ap.add_argument('--alloc-frac', type=float, default=0.10,
@@ -117,8 +91,18 @@ def main():
            .pipe(pd.to_datetime).diff().median())
     bpd = max(1, round(pd.Timedelta(days=1) / med))
     H = args.horizon_days * bpd
-    cfg = {'mode': args.exit_mode, 'tp': args.tp, 'sl': args.sl,
-           'trail': args.trail, 'init_sl': args.init_sl, 'activate': args.activate}
+    if args.trail is None:
+        args.trail = 0.25 if args.exit_mode == 'trailing' else 0.0
+    cfg = {'mode': args.exit_mode, 'tp': args.tp, 'sl': args.sl, 'trail': args.trail,
+           'activate': args.activate, 'exit_thr': args.exit_thr, 'min_dd': args.min_dd}
+    exit_probs = None
+    if args.exit_mode in ('short', 'model'):
+        if not args.exit_probs:
+            ap.error('--exit-probs is required for --exit-mode short/model')
+        exit_probs = load_exit_probs(os.path.join(base, args.exit_probs), args.exit_prob_col)
+        start = min(v.index.min() for v in exit_probs.values())
+        sig = sig[sig['Date'] >= start]   # every trade must be able to see the exit signal
+    ep_cache = {}
 
     # Precompute every candidate trade (price path is capital-independent).
     arrs = {}
@@ -133,11 +117,15 @@ def main():
             s = d2p.get(np.datetime64(d))
             if s is None:
                 continue
-            r = resolve_trade(o, hi, lo, cl, dt, s, cfg, H, args.fee, args.slippage)
+            if exit_probs is not None and sym not in ep_cache:
+                ep_cache[sym] = align_probs(dt, exit_probs.get(sym))
+            r = resolve_long(o, hi, lo, cl, dt, s, cfg, H, args.fee, args.slippage,
+                             exit_p=ep_cache.get(sym))
             if r:
                 cands.append({'symbol': sym, 'signal_date': pd.Timestamp(d),
-                              'entry_date': r[0], 'exit_date': r[1],
-                              'net_ret': r[2], 'outcome': r[3]})
+                              'entry_date': pd.Timestamp(dt[r['entry_i']]),
+                              'exit_date': pd.Timestamp(dt[r['exit_i']]),
+                              'net_ret': r['net'], 'outcome': r['outcome'], 'entry_px': r['entry_px']})
     # Optional market-regime gate: allow a signal only if the regime (known as of
     # the signal bar) permits trading. Backward-asof -> only past info.
     regime_fn = None
@@ -159,15 +147,20 @@ def main():
     if args.exit_mode == 'barrier':
         print(f"  EXIT barrier: TP +{args.tp*100:.0f}% / SL -{args.sl*100:.0f}% / {args.horizon_days}d | "
               f"candidate signals: {len(cands)}")
-    else:
-        print(f"  EXIT trailing: {args.trail*100:.0f}% below peak, hard stop -{args.init_sl*100:.0f}%, "
+    elif args.exit_mode == 'trailing':
+        print(f"  EXIT trailing: {args.trail*100:.0f}% below peak, hard stop -{args.sl*100:.0f}%, "
               f"max {args.horizon_days}d | candidate signals: {len(cands)}")
+    else:
+        print(f"  EXIT {args.exit_mode}: prob >= {args.exit_thr} & >= {args.min_dd*100:.0f}% off peak, "
+              f"hard stop -{args.sl*100:.0f}%"
+              + (f", trail {args.trail*100:.0f}%" if args.trail > 0 else '')
+              + f", max {args.horizon_days}d | candidate signals: {len(cands)}")
     print("=" * 72)
 
     # Event-driven portfolio pass.
     cash = args.initial_equity
     open_pos = []        # list of dicts with exit_date, size, net_ret, symbol
-    held = set()         # symbols currently open
+    busy_until = {}      # symbol -> exit_date of its last opened trade (same re-entry rule as entry_backtest)
     executed, skipped_cash, skipped_held, skipped_regime = [], 0, 0, 0
     equity_curve = []    # (date, realized_equity) recorded at each close
 
@@ -181,7 +174,6 @@ def main():
         for p in sorted(due, key=lambda x: x['exit_date']):
             cash += p['size'] * (1 + p['net_ret'])       # return capital + P&L
             open_pos.remove(p)
-            held.discard(p['symbol'])
             equity_curve.append((p['exit_date'], realized_equity()))
 
     for c in cands:
@@ -189,7 +181,7 @@ def main():
         if regime_fn is not None and not regime_fn(c['signal_date']):
             skipped_regime += 1
             continue
-        if c['symbol'] in held:
+        if c['signal_date'] <= busy_until.get(c['symbol'], pd.Timestamp.min):
             skipped_held += 1
             continue
         size = args.alloc_frac * realized_equity()
@@ -201,7 +193,7 @@ def main():
         cash -= size
         open_pos.append({'exit_date': c['exit_date'], 'size': size,
                          'net_ret': c['net_ret'], 'symbol': c['symbol']})
-        held.add(c['symbol'])
+        busy_until[c['symbol']] = c['exit_date']
         c2 = dict(c); c2['size'] = size; c2['pnl_usd'] = size * c['net_ret']
         executed.append(c2)
 
@@ -220,6 +212,24 @@ def main():
     ec = pd.DataFrame(equity_curve, columns=['Date', 'equity']).sort_values('Date')
     ec = ec.drop_duplicates('Date', keep='last').reset_index(drop=True)
     ec.to_csv(os.path.join(base, args.out_dir, f'portfolio_equity{tag}.csv'), index=False)
+
+    # Daily mark-to-market equity: open positions valued at each day's last Close.
+    days = pd.date_range(td['entry_date'].min().normalize(), td['exit_date'].max().normalize(), freq='D')
+    mtm = np.zeros(len(days))
+    daily_close = {}
+    for sym in td['symbol'].unique():
+        o_, h_, l_, c_, d_, _ = arrs[sym]
+        daily_close[sym] = pd.Series(c_, index=pd.DatetimeIndex(d_)).resample('D').last().ffill()
+    for _, t in td.iterrows():
+        dc = daily_close[t['symbol']].reindex(days).ffill().values
+        a = days.searchsorted(t['entry_date'].normalize())
+        b = days.searchsorted(t['exit_date'].normalize())
+        mtm[a:b] += t['size'] * (dc[a:b] / t['entry_px'] - 1.0)   # unrealized while open
+        mtm[b:] += t['size'] * t['net_ret']                         # realized after exit
+    mtm_eq = pd.Series(args.initial_equity + mtm, index=days)
+    mtm_dd = (mtm_eq / mtm_eq.cummax() - 1.0)
+    mtm_eq.rename('equity_mtm').to_frame().to_csv(
+        os.path.join(base, args.out_dir, f'portfolio_equity_mtm{tag}.csv'), index_label='Date')
 
     # Metrics
     ret = final_equity / args.initial_equity - 1.0
@@ -241,7 +251,12 @@ def main():
     print(f"  FINAL equity:      ${final_equity:,.0f}")
     print(f"  Total return:      {ret*100:+.1f}%   over ~{span_years:.1f} years")
     print(f"  CAGR:              {cagr*100:+.1f}% / year")
-    print(f"  Max drawdown:      {max_dd*100:.1f}%")
+    print(f"  Max drawdown:      {max_dd*100:.1f}%  (realized, closed trades only)")
+    print(f"  Max DD (MTM):      {mtm_dd.min()*100:.1f}%  on {mtm_dd.idxmin().date()} "
+          f"(peak {mtm_eq[:mtm_dd.idxmin()].idxmax().date()})  <- open positions marked daily")
+    yr_ret = mtm_eq.resample('YE').last().pct_change()
+    yr_ret.iloc[0] = mtm_eq.resample('YE').last().iloc[0] / args.initial_equity - 1
+    print("  Calendar-year return (MTM): " + ", ".join(f"{d.year} {v*100:+.0f}%" for d, v in yr_ret.items()))
     print(f"\n  Trades: {os.path.join(args.out_dir,f'portfolio_trades{tag}.csv')} | "
           f"Equity: {os.path.join(args.out_dir,f'portfolio_equity{tag}.csv')}")
 

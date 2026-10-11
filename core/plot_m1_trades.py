@@ -9,6 +9,9 @@ each one on real price, colored by outcome:
     TP   (green)  — hit +100% take-profit
     SL   (red)    — hit -40% stop
     TIME (gold)   — neither; exited at the 60-day time stop
+    SHORT (cyan)  — exits.py 'short' mode: short model fired after a pullback
+    EXIT (purple) — exits.py 'model' mode: dedicated exit model fired
+    TRAIL (blue)  — trailing stop
 
 Each entry is linked to its exit so the realized move is visible. A dropdown
 switches coins (ordered by P&L); the first page is an ALL-COINS overview that
@@ -27,7 +30,8 @@ import argparse
 import numpy as np
 import pandas as pd
 
-OUTCOME_COLORS = {'TP': '#3fb950', 'SL': '#f85149', 'TIME': '#d29922'}
+OUTCOME_COLORS = {'TP': '#3fb950', 'SL': '#f85149', 'TIME': '#d29922',
+                  'SHORT': '#39c5cf', 'EXIT': '#bc8cff', 'TRAIL': '#58a6ff'}
 
 
 def discover_price_csvs(base_dir):
@@ -99,9 +103,9 @@ def main():
         px = pd.read_csv(price_csvs[sym], usecols=['Date', 'Close'])
         px['Date'] = pd.to_datetime(px['Date'])
 
+        # Run price to the end of data so periods with no signal stay visible.
         start = g['entry_date'].min() - pd.Timedelta(days=60)
-        stop = g['exit_date'].max() + pd.Timedelta(days=30)
-        pxw = px[(px['Date'] >= start) & (px['Date'] <= stop)]
+        pxw = px[px['Date'] >= start]
 
         base_n = len(trace_pages)
         page_idx = len(pages)
@@ -146,12 +150,10 @@ def main():
             name='exit', visible=False, hoverinfo='skip', showlegend=False))
         trace_pages.append(page_idx)
 
-        n_tp = (g['outcome'] == 'TP').sum()
-        n_sl = (g['outcome'] == 'SL').sum()
-        n_tm = (g['outcome'] == 'TIME').sum()
+        oc_counts = ' / '.join(f'{k} {v}' for k, v in g['outcome'].value_counts().sort_index().items())
         pages.append((
             f"{sym}  (${pnl_by_coin[sym]:,.0f} · {len(g)} trades)",
-            f"{sym} — {len(g)} entries · TP {n_tp} / SL {n_sl} / TIME {n_tm} · "
+            f"{sym} — {len(g)} entries · {oc_counts} · "
             f"P&amp;L ${pnl_by_coin[sym]:,.0f}",
             base_n))
 

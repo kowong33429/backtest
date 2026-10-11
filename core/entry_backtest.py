@@ -20,6 +20,18 @@ RULES
   Costs    : fee + slippage charged on BOTH entry and exit (AGENTS.md Rule #9).
 
 Sizing: fixed notional per trade, so each trade's $ P&L = notional * net return.
+
+EXIT MODES (--exit-mode, see exits.py)
+  barrier (default) : the rules above.
+  short             : NO fixed TP. Hard SL -sl, exit when the SHORT model's OOF prob
+                      >= --exit-thr AND price is >= --min-dd below the trade's peak.
+                      Max hold --horizon-days (use e.g. 365). Signals before the
+                      exit-prob file starts are dropped so every trade can use it.
+  model             : same, but --exit-probs is a dedicated exit model (exit_model.py).
+
+    python core/entry_backtest.py --oof data/model/v2/m1_100pct_60d/entry_oof.parquet \
+        --threshold 0.8 --exit-mode short --exit-probs data/model/short_v2/entry_oof.parquet \
+        --exit-thr 0.5 --min-dd 0.20 --horizon-days 365 --out-dir data/model/v2/m1_short_exit
 """
 import os
 import sys
@@ -27,6 +39,9 @@ import glob
 import argparse
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from exits import resolve_long, load_exit_probs, align_probs  # noqa: E402
 
 
 def simulate_coin(df, sig_dates, tp, sl, horizon_bars, fee, slip, notional):
@@ -84,19 +99,63 @@ def simulate_coin(df, sig_dates, tp, sl, horizon_bars, fee, slip, notional):
     return trades
 
 
+def simulate_coin_exit(df, sig_dates, cfg, horizon_bars, fee, slip, notional, exit_p):
+    """Like simulate_coin, but the exit comes from exits.resolve_long (non-barrier modes)."""
+    df = df.sort_values('Date').reset_index(drop=True)
+    o, hi, lo, cl = (df['Open'].values, df['High'].values,
+                     df['Low'].values, df['Close'].values)
+    dt = df['Date'].values
+    date_to_pos = {d: i for i, d in enumerate(dt)}
+    sig_pos = sorted(date_to_pos[d] for d in sig_dates if d in date_to_pos)
+    ep = align_probs(dt, exit_p)
+
+    trades, cooldown_until = [], -1
+    for s in sig_pos:
+        if s <= cooldown_until:
+            continue
+        r = resolve_long(o, hi, lo, cl, dt, s, cfg, horizon_bars, fee, slip, exit_p=ep)
+        if r is None:
+            continue
+        trades.append({
+            'entry_date': pd.Timestamp(dt[r['entry_i']]),
+            'entry_price': r['entry_px'],
+            'exit_date': pd.Timestamp(dt[r['exit_i']]),
+            'exit_price': r['exit_px'],
+            'bars_held': int(r['exit_i'] - r['entry_i']),
+            'outcome': r['outcome'],
+            'gross_ret': r['exit_px'] / r['entry_px'] - 1.0,
+            'net_ret': r['net'],
+            'pnl_usd': r['net'] * notional,
+            'peak_ret': r['peak'] / r['entry_px'] - 1.0,
+        })
+        cooldown_until = r['exit_i']
+    return trades
+
+
 def main():
     ap = argparse.ArgumentParser(description="Backtest the entry model's OOS signal")
     ap.add_argument('--oof', default='data/model/entry_oof.parquet')
     ap.add_argument('--prob-col', default='oof_prob_xgb')
     ap.add_argument('--threshold', type=float, default=0.70)
     ap.add_argument('--tp', type=float, default=1.00)
-    ap.add_argument('--sl', type=float, default=0.40)
+    ap.add_argument('--sl', '--init-sl', dest='sl', type=float, default=0.40,
+                    help='stop loss (barrier) / hard stop floor (other modes)')
     ap.add_argument('--horizon-days', type=int, default=30)
     ap.add_argument('--fee', type=float, default=0.001, help='fee per side (0.001=0.1%%)')
     ap.add_argument('--slippage', type=float, default=0.0005)
     ap.add_argument('--notional', type=float, default=100.0, help='$ per trade')
     ap.add_argument('--interval', default='4h',
                     help="Timeframe suffix of the source CSVs (e.g. 4h, 1d). Default 4h.")
+    ap.add_argument('--exit-mode', choices=['barrier', 'trailing', 'short', 'model'], default='barrier')
+    ap.add_argument('--exit-probs', default=None,
+                    help="short/model mode: OOF parquet whose prob is the exit signal")
+    ap.add_argument('--exit-prob-col', default='oof_prob_xgb')
+    ap.add_argument('--exit-thr', type=float, default=0.5)
+    ap.add_argument('--min-dd', type=float, default=0.20,
+                    help='short/model mode: only exit once Close is this far below the trade peak')
+    ap.add_argument('--trail', type=float, default=None,
+                    help='trailing stop below the peak (default: 0.25 in trailing mode, off otherwise)')
+    ap.add_argument('--activate', type=float, default=0.0, help='arm the trail after +this profit')
     ap.add_argument('--out-dir', default='data/model')
     args = ap.parse_args()
 
@@ -109,9 +168,30 @@ def main():
     oof['Date'] = pd.to_datetime(oof['Date'])
     oof = oof.dropna(subset=[args.prob_col])
     sig = oof[oof[args.prob_col] >= args.threshold]
+    exit_probs = None
+    if args.exit_mode in ('short', 'model'):
+        if not args.exit_probs:
+            ap.error('--exit-probs is required for --exit-mode short/model')
+        exit_probs = load_exit_probs(os.path.join(base, args.exit_probs), args.exit_prob_col)
+        start = min(v.index.min() for v in exit_probs.values())
+        sig = sig[sig['Date'] >= start]   # every trade must be able to see the exit signal
+    if args.trail is None:
+        args.trail = 0.25 if args.exit_mode == 'trailing' else 0.0
+    cfg = {'mode': args.exit_mode, 'tp': args.tp, 'sl': args.sl, 'trail': args.trail,
+           'activate': args.activate, 'exit_thr': args.exit_thr, 'min_dd': args.min_dd}
     print("=" * 72)
-    print(f"  ENTRY BACKTEST | prob={args.prob_col} >= {args.threshold} | "
-          f"TP +{args.tp*100:.0f}% / SL -{args.sl*100:.0f}% / {args.horizon_days}d")
+    if args.exit_mode == 'barrier':
+        print(f"  ENTRY BACKTEST | prob={args.prob_col} >= {args.threshold} | "
+              f"TP +{args.tp*100:.0f}% / SL -{args.sl*100:.0f}% / {args.horizon_days}d")
+    else:
+        print(f"  ENTRY BACKTEST | prob={args.prob_col} >= {args.threshold} | EXIT {args.exit_mode}: "
+              f"SL -{args.sl*100:.0f}%"
+              + (f", exit prob >= {args.exit_thr} & >= {args.min_dd*100:.0f}% off peak"
+                 if args.exit_mode in ('short', 'model') else '')
+              + (f", trail {args.trail*100:.0f}%" if args.trail > 0 else '')
+              + f", max {args.horizon_days}d")
+        if exit_probs is not None:
+            print(f"  Exit signal: {args.exit_probs} (signals from {start.date()} on)")
     print(f"  OOS bars scored: {len(oof)} | raw signal bars: {len(sig)} "
           f"across {sig['symbol'].nunique()} coins")
     print(f"  Costs: fee {args.fee*100:.2f}%/side + slip {args.slippage*100:.3f}%/side "
@@ -134,8 +214,13 @@ def main():
             continue
         df = pd.read_csv(csv)
         df['Date'] = pd.to_datetime(df['Date'])
-        tr = simulate_coin(df, set(grp['Date']), args.tp, args.sl, horizon_bars,
-                           args.fee, args.slippage, args.notional)
+        if args.exit_mode == 'barrier':
+            tr = simulate_coin(df, set(grp['Date']), args.tp, args.sl, horizon_bars,
+                               args.fee, args.slippage, args.notional)
+        else:
+            tr = simulate_coin_exit(df, set(grp['Date']), cfg, horizon_bars, args.fee,
+                                    args.slippage, args.notional,
+                                    None if exit_probs is None else exit_probs.get(sym))
         for t in tr:
             t['symbol'] = sym
         all_trades.extend(tr)
@@ -160,7 +245,7 @@ def main():
     total_pnl = td['pnl_usd'].sum()
     oc = td['outcome'].value_counts().to_dict()
 
-    print(f"\n  TRADES: {n}  (TP {oc.get('TP',0)} / SL {oc.get('SL',0)} / TIME {oc.get('TIME',0)})")
+    print(f"\n  TRADES: {n}  ({' / '.join(f'{k} {v}' for k, v in sorted(oc.items()))})")
     print(f"  Win rate (ชนะ %):      {win_rate*100:.1f}%")
     print(f"  Avg win:               +{wins['net_ret'].mean()*100:.1f}%" if len(wins) else "  Avg win: -")
     print(f"  Avg loss:              {losses['net_ret'].mean()*100:.1f}%" if len(losses) else "  Avg loss: -")
@@ -169,6 +254,9 @@ def main():
     print(f"  Avg bars held:         {td['bars_held'].mean():.0f}  (~{td['bars_held'].mean()/bpd:.0f} days)")
     print(f"  Total P&L (@${args.notional:.0f}/trade): ${total_pnl:,.0f}  "
           f"on {n} trades = {total_pnl/(n*args.notional)*100:+.1f}% of deployed")
+    print(f"  Trades > +100% / > +300%: {(td['net_ret'] > 1).sum()} / {(td['net_ret'] > 3).sum()}"
+          f"   |   best {td['net_ret'].max()*100:+.0f}%")
+    print(f"  P&L per 100 position-days: ${total_pnl / max(1, td['bars_held'].sum() / bpd) * 100:,.0f}")
     print(f"\n  Trades CSV: {out_csv}")
 
     # Per-year and per-coin breakdown
