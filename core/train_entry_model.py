@@ -110,6 +110,8 @@ def main():
     ap.add_argument('--min-child-weight', type=float, default=1.0)
     ap.add_argument('--colsample', type=float, default=0.8, help='colsample_bytree')
     ap.add_argument('--seed', type=int, default=42)
+    ap.add_argument('--lean', action='store_true',
+                    help='large panels: float32 features and skip the Logistic baseline (memory)')
     ap.add_argument('--out-dir', default='data/model')
     args = ap.parse_args()
 
@@ -129,7 +131,7 @@ def main():
 
     non_feat = {'Date', 'symbol', 'Entry_Label', 'Label_EndDate', 'Sample_Weight'}
     feat_cols = [c for c in panel.columns if c not in non_feat]
-    X = panel[feat_cols].astype(float).fillna(0.0)
+    X = panel[feat_cols].astype('float32' if args.lean else float).fillna(0.0)
     y = panel['Entry_Label'].astype(int).values
     w = panel['Sample_Weight'].astype(float).values
     dates = panel['Date'].values
@@ -175,14 +177,15 @@ def main():
         oof_xgb[te] = xgb.predict_proba(Xte)[:, 1]
 
         # --- Logistic baseline (standardized) ---
-        sc = StandardScaler().fit(Xtr)
-        lr = LogisticRegression(max_iter=1000, class_weight='balanced', C=0.5)
-        lr.fit(sc.transform(Xtr), ytr, sample_weight=wtr)
-        oof_lr[te] = lr.predict_proba(sc.transform(Xte))[:, 1]
+        if not args.lean:
+            sc = StandardScaler().fit(Xtr)
+            lr = LogisticRegression(max_iter=1000, class_weight='balanced', C=0.5)
+            lr.fit(sc.transform(Xtr), ytr, sample_weight=wtr)
+            oof_lr[te] = lr.predict_proba(sc.transform(Xte))[:, 1]
 
         from sklearn.metrics import average_precision_score
         ap_x = average_precision_score(yte, oof_xgb[te])
-        ap_l = average_precision_score(yte, oof_lr[te])
+        ap_l = average_precision_score(yte, oof_lr[te]) if not args.lean else float('nan')
         tr_span = f"{pd.Timestamp(dates[tr].min()).date()}..{pd.Timestamp(dates[tr].max()).date()}"
         te_span = f"{pd.Timestamp(dates[te].min()).date()}..{pd.Timestamp(dates[te].max()).date()}"
         print(f"  fold {k}: train {len(tr):>6} [{tr_span}] | test {len(te):>5} [{te_span}] "
@@ -196,7 +199,7 @@ def main():
     print("\n" + "-" * 72)
     print(f"POOLED OUT-OF-SAMPLE ({mask.sum()} bars, base rate {yv.mean()*100:.2f}%)")
     ap_x, rows_x = pr_report(yv, oof_xgb[mask], yv.mean())
-    ap_l, rows_l = pr_report(yv, oof_lr[mask], yv.mean())
+    ap_l, rows_l = (pr_report(yv, oof_lr[mask], yv.mean()) if not args.lean else (float('nan'), []))
     print(f"  PR-AUC:  XGBoost {ap_x:.3f}   |   Logistic baseline {ap_l:.3f}   "
           f"(random = {yv.mean():.3f})")
     print(f"\n  XGBoost precision/recall/lift by threshold:")
@@ -207,6 +210,8 @@ def main():
                if ap_x > ap_l + 0.005 else
                "XGBoost does NOT clearly beat the linear baseline — likely overfitting; "
                "prefer the simpler model or revisit features/labels.")
+    if args.lean:
+        verdict = "(--lean: Logistic baseline skipped, no comparison)"
     print(f"\n  VERDICT: {verdict}")
 
     # --- Final model on ALL data (for live inference) ---

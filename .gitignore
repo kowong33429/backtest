@@ -26,3 +26,6 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# survivorship-free universe (core/universe_download.py) - large
+data_all/

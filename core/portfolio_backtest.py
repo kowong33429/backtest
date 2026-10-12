@@ -74,6 +74,7 @@ def main():
     ap.add_argument('--slippage', type=float, default=0.0005)
     ap.add_argument('--out-dir', default='data/model')
     ap.add_argument('--tag', default='', help='suffix for output files to keep runs separate')
+    ap.add_argument('--root', default='data', help="price-data folder ('data' or 'data_all')")
     ap.add_argument('--regime-file', default=None, help='parquet from regime_detector.py')
     ap.add_argument('--regime-col', default=None, help='column to gate on (e.g. supertrend_bull / hmm_favorable)')
     args = ap.parse_args()
@@ -86,7 +87,7 @@ def main():
     sig = oof[oof[args.prob_col] >= args.threshold][['Date', 'symbol']].copy()
 
     csvs = {os.path.basename(c).replace('_4h_full.csv', '').upper(): c
-            for c in glob.glob(os.path.join(base, 'data', '*', '*_4h_full.csv'))}
+            for c in glob.glob(os.path.join(base, args.root, '*', '*_4h_full.csv'))}
     med = (pd.read_csv(next(iter(csvs.values())), usecols=['Date'])['Date']
            .pipe(pd.to_datetime).diff().median())
     bpd = max(1, round(pd.Timedelta(days=1) / med))

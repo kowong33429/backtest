@@ -13,6 +13,126 @@ enforced end-to-end.
 > **1,688 trades · 45.6% win · +9.25% expectancy/trade · PF 1.62 · +$15,606**
 > at $100/trade. This is the configuration the cleaned-up codebase keeps.
 
+> ⚠️ **Read [Survivorship-free test](#-survivorship-free-test-2026-10) first.** Every result on
+> the ~144-coin research basket is inflated: the basket was picked by `trend_scanner` from coins
+> that *already* rallied. On a universe of every Binance USDT-M perp that ever existed (incl.
+> delisted), the entry-model strategies below do **not** beat buying and holding BTC. The best
+> honest result so far is the plain BTC trend filter (`--preset btc-trend`, +30%/yr, −25% DD).
+> What changed and when: [Changelog](#-changelog).
+
+---
+
+## 🧯 Survivorship-free test (2026-10)
+
+| Step | Script | Output |
+|------|--------|--------|
+| All 703 crypto USDT-M perps ever listed (active + delisted; stocks/ETFs/indices excluded), 4H perp prices + funding from data.binance.vision | `core/universe_download.py` | `data_all/<sym>/<SYM>_4h_full.csv` |
+| Panel kept only while a coin is in the **point-in-time top-120 by 30d volume** (ranked with yesterday's volume) | `core/universe_panel.py` | `data_all/model/entry_panel_univ.parquet`, `data_all/volume_rank.parquet` |
+| m1 retrained, same label / CV (6 purged folds, 3d embargo), `--lean` | `core/train_entry_model.py` | `data_all/model/m1_univ/` |
+| Rotation on that universe | `core/rotation_backtest.py --root data_all --universe-top 120 --oof data_all/model/m1_univ/entry_oof.parquet` | |
+
+Same window for every row: 2021-10-28 → 2026-10 (first OOS fold onward), costs 0.15%/side.
+
+| Setup | CAGR | Max DD (MTM) |
+|-------|------|--------------|
+| b7 on the research basket (spot prices, basket-trained m1) | +131.6% | −34.3% |
+| b7, universe-trained m1, alts restricted to the basket coins | +37.9% | −57.7% |
+| b7, universe-trained m1, 144 **random** universe coins (5 draws, median) | +14.9% | — |
+| **b7 on the point-in-time top-120 universe** | **−4.6%** | −73.8% |
+| b7-ens / core only / v5 on the same universe | −4.2% / +1.8% / −34.9% | −74.0% / −70.4% / −92.7% |
+| **BTC buy & hold** | **+7.5%** | −76.7% |
+
+Universe-trained m1 has pooled OOS PR-AUC **0.073 vs a 0.081 base rate** — no skill. Top-60 and
+unrestricted universes give the same picture. Most of the basket edge came from hindsight coin
+selection plus a model trained on those coins.
+
+**Catching more of the big runs (2026-10-13).** The rotation misses most mega-rallies on this
+universe (31 of 166 episodes of +500% within 90 days touched, none captured ≥3x), largely because
+a coin breaking out of a long base is not yet a top-volume coin (ZEC was ranked 200–300 by volume
+while it traded $40–55). A breakout sleeve fixes the reach, but not the economics. Measured on the
+data after the 2026-10-12 update, same window:
+
+| Preset (`--root data_all --universe-top 120 --oof data_all/model/m1_univ/entry_oof.parquet`) | CAGR | Max DD | Episodes touched / ≥3x | ZEC 2025 entry |
+|---|---|---|---|---|
+| `btc-trend` — BTC while above SMA50 & SMA200, else cash | **+30.1%** | **−24.6%** | — | — |
+| `greedy` — every liquid 90d breakout (vol ≥ 1.3x, ≥ $3M/day, ≥ 90d old), 1% each, + BTC trend | +27.2% | −39.9% | 75 / 17 | **$52.83** (sold $452.04, 8.6x) |
+| `greedy-alts` — same breakouts, idle cash stays cash | +7.6% | −40.5% | 75 / 17 | $52.83 |
+| `b7` (for reference) | −5.1% | −73.8% | 31 / 0 | $229.8 |
+
+`greedy` is robust (10 random 70% coin subsets: median +28.2%, min +25.4%; 2x costs +23.4%;
+one-day delay +23.6%; both 2021-23 and 2024-26 positive), but almost all of its return is the BTC
+trend leg: the alt breakouts on their own make about +7.6%/yr, so adding them to `btc-trend`
+*lowers* CAGR by ~3 points and deepens the drawdown by ~15. Use them only if you explicitly want
+exposure to the big runners.
+
+### Paper trading (forward record)
+
+`core/rotation_paper.py` runs once a day after 00:00 UTC: it appends the newest closed bars,
+scores them with the final model (history keeps the OOF probs), builds the book with the same
+`build_weights` as the backtest, and saves the target for that day's Open. The paper P&L uses
+only targets saved by earlier runs — it is never back-filled.
+
+```bash
+python core/rotation_paper.py --update --root data_all --universe-top 120 --preset b7-ens \
+    --oof data_all/model/m1_univ/entry_oof.parquet --model-dir data_all/model/m1_univ --paper-dir data_all/paper
+python core/rotation_paper.py --report --root data_all --universe-top 120 --oof data_all/model/m1_univ/entry_oof.parquet --paper-dir data_all/paper
+```
+
+---
+
+## 📝 Changelog
+
+All backtest numbers are out-of-sample; costs 0.10% fee + 0.05% slippage per side. "Basket" = the
+144-coin research basket (survivorship-biased, see above); "universe" = `data_all`.
+
+### 2026-10-13 — survivorship-free universe, paper trading, greedy breakouts
+- **Added `core/universe_download.py`**: 4H perp klines + funding for all 703 crypto USDT-M perps ever
+  listed (active and delisted) from data.binance.vision → `data_all/` (git-ignored). Stocks, ETFs,
+  commodities, FX and index perps are excluded.
+- **Added `core/universe_panel.py`**: entry panel kept only while a coin is in the point-in-time
+  top-N by 30d median quote volume (ranked with yesterday's volume); writes `data_all/volume_rank.parquet`.
+- **`train_entry_model.py --lean`**: float32 features and no Logistic baseline, for large panels.
+  m1 retrained on the universe panel → `data_all/model/m1_univ/` (OOS PR-AUC 0.073 vs base 0.081).
+- **`rotation_backtest.py`**: `--root`, `--universe-top N` (point-in-time liquid universe for core,
+  leaders and breadth), `--breakout` sleeve (`--bo-lookback/-vol-x/-min-usd/-size/-min-age/-rank`),
+  `--no-core`, presets `btc-trend`, `greedy`, `greedy-alts`. `main()` split into `get_parser`,
+  `apply_preset`, `load_inputs`, `build_weights` so experiments reuse the production code.
+- **`portfolio_backtest.py --root`** to run the m1 portfolio on `data_all`.
+- **Added `core/rotation_paper.py`**: daily forward recorder (update bars → score new bars with the
+  final model → same `build_weights` → save today's target; P&L only from earlier saved targets).
+  Verified to reproduce the backtest weights exactly. First target saved for 2026-10-12.
+- **Finding**: on the universe every rotation preset loses to BTC buy & hold; the edge on the basket
+  was hindsight selection. `btc-trend` (+30.1%, −24.6% DD) is the best honest result; `greedy`
+  buys ZEC at $52.83 (2025-09-14) and touches 75/166 mega-rallies but adds nothing over `btc-trend`.
+
+### 2026-10-12 — rotation strategy and iteration log (basket)
+- **Added `core/rotation_backtest.py`**: every 7 days hold the top-10 coins by the buy model's OOF
+  prob (7d mean), keep while rank ≤ 20, breadth filter (alts only if > 50% of coins are above their
+  50d SMA), idle cash → BTC. Basket: +165% CAGR / −58% DD vs m1 threshold portfolio +37% / −82%.
+- **Leader sleeve** (`--leaders`): relative-strength leaders on their own trend, any regime, only from
+  idle cash — catches lone runners such as ZEC 2025 when the core is switched off.
+- **Presets from a 15-round iteration log** (each change kept only if full-period Calmar rose without
+  either half dropping > 10%; later rounds also required the median of 10 random coin subsets to rise):
+  `b6` (leaders enter/hold within 25% of the 60d high, 35% once +100%; young-coin sleeve; BTC
+  fallback above SMA50 & SMA200; 80% vol target; core needs BTC > SMA100), `b7` (b6 with 3 leaders and
+  70% vol target; basket +221.7% / −34.3%), `b7-ens` (b7 averaged over near-high bands 20/25/30%,
+  because 25% was a sharp optimum). Rejected: breadth smoothing, exit confirmation, volume filter,
+  blended core score, entry-only near-high filter.
+
+### 2026-10-11 — short model, model-driven exits (commit `c542b8a`)
+- **Short model v2**: `train_entry_model.py` gained `--n-estimators/--max-depth/--min-child-weight/
+  --colsample/--seed`; 600 trees, depth 5, min_child_weight 50, colsample 0.5 → `data/model/short_v2`
+  (basket short backtest at ~700 trades: PF 2.15 → 3.30, P&L +57%). New features (58 TA, BTC,
+  cross-section), long-window mean-reversion features, SL-first weighting, label alignment and the
+  correlation filter were all tested and **not** kept.
+- **`core/exits.py`**: shared long-exit engine (barrier / trailing / short-model / exit-model) used
+  by `entry_backtest.py` and `portfolio_backtest.py`; short-model exit = short prob ≥ thr AND Close ≥
+  20% below the trade peak. `portfolio_backtest.py` now reports a daily mark-to-market drawdown.
+- **`core/exit_model.py`**: dedicated exit model on in-trade bars — no skill (PR-AUC 0.51 vs base
+  0.52), kept for reference only.
+- `entry_backtest_short.py --sl-cooldown-days`, `plot_train_entries.py --sort`, plot colours for the
+  new exit outcomes.
+
 ---
 
 ## 🏆 Baseline model (kept)
