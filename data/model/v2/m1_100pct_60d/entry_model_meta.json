@@ -110,10 +110,23 @@
     "HY_SPREAD"
   ],
   "threshold": 0.9,
-  "pr_auc_xgb": 0.18662627045556462,
-  "pr_auc_lr": 0.14662475794971377,
-  "base_rate": 0.14379655465534547,
-  "scale_pos_weight": 5.946810603452516,
+  "pr_auc_xgb": 0.22423416617007735,
+  "pr_auc_lr": 0.14748234113811015,
+  "base_rate": 0.14114844528766082,
+  "scale_pos_weight": 6.0761692081066,
   "n_splits": 6,
-  "embargo_days": 3
+  "embargo_days": 3,
+  "xgb_params": {
+    "n_estimators": 300,
+    "learning_rate": 0.03,
+    "max_depth": 4,
+    "min_child_weight": 1.0,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "scale_pos_weight": 6.0761692081066,
+    "random_state": 42,
+    "n_jobs": 4,
+    "verbosity": 0,
+    "eval_metric": "aucpr"
+  }
 }

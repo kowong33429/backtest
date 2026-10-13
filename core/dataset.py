@@ -49,11 +49,15 @@ SCALE_FREE_PREFIXES = (
     'BB_Width_',       # (upper-lower)/sma ratio (also BB_Width_*_Lag1)
     'Dist_SMA_',       # (close-sma)/sma ratio
     'Return_',         # pct_change (also Return_1/2 and _Lag1)
+    'Dist_Low_',       # (close-low)/low ratio
+    'Dist_High_',      # (close-high)/high ratio
     'Volume_Surge_',   # volume / rolling-avg volume ratio
-    'Dist_Donchian_Mid_',
-    'Donchian_Width_',
-    'Bar_Donchian_Frac_',
+    'Pos_In_',         # 0-1 position within range
+    'Dist_VWAP_',      # (close-vwap)/vwap ratio
 )
+# Donchian columns (Dist_Donchian_Mid_/Donchian_Width_/Bar_Donchian_Frac_) are still
+# computed by features.py for the short-label filters but are NOT model inputs: they
+# were tried for the short model and not kept (README changelog 2026-10-11).
 SCALE_FREE_EXACT = {'SMA_Cross', 'ATR_Ratio'}
 # Explicitly DROPPED (absolute units -> not comparable across coins):
 #   SMA_*, ATR_* (price), MACD / MACD_Hist / *_Lag1 (price-scale EMA diff),

@@ -10,7 +10,7 @@ enforced end-to-end.
 > **TL;DR — the baseline that works.** Entry model **m1 (+100% within 60 days,
 > stop −40%)**, trade every bar whose out-of-sample probability **≥ 0.60**, exit
 > on a **fixed +100% take-profit** (SL −40%, 60-day time stop). Out-of-sample:
-> **1,688 trades · 45.6% win · +9.25% expectancy/trade · PF 1.62 · +$15,606**
+> **2,154 trades · 43.2% win · +8.35% expectancy/trade · PF 1.53 · +$17,976**
 > at $100/trade. This is the configuration the cleaned-up codebase keeps.
 
 > ⚠️ **Read [Survivorship-free test](#-survivorship-free-test-2026-10) first.** Every result on
@@ -20,16 +20,11 @@ enforced end-to-end.
 > honest result so far is the plain BTC trend filter (`--preset btc-trend`, +30%/yr, −25% DD).
 > What changed and when: [Changelog](#-changelog).
 
-> ❗ **TODO — every number in this README predates the macro leak fix (2026-10-13).** Yahoo closes
-> and FRED releases used to reach bars before they were public (see the
-> [changelog](#2026-10-13--macro-look-ahead-fixes-review-of-c542b8a--bee0883)). The panels and models in
-> `data/model/` and `data_all/model/` were built with those leaky features. Before trusting any
-> result or the paper trader:
-> 1. Rebuild the panels (`core/dataset.py` for the basket / short panel, `core/universe_panel.py` for `data_all`).
-> 2. Retrain m1 (basket), short_v2 and m1_univ with `core/train_entry_model.py` (same args as before).
-> 3. Re-run `entry_backtest.py`, `portfolio_backtest.py` and `rotation_backtest.py` and update the tables below.
-> 4. Restart the paper record (`data_all/paper/`) with the retrained `m1_univ` — targets saved
->    so far came from a model trained on leaky features.
+> ℹ️ **Re-run after the macro leak fix (2026-10-13).** m1, short_v2 and m1_univ were rebuilt and
+> retrained on the fixed macro features, and the tables marked *(re-run 2026-10-13)* were refreshed.
+> Rows marked *pre-fix* come from models that were not retrained (m2, daily, original 30d, exit
+> experiments) and from an older data snapshot. The paper record restarted on 2026-10-13. Details:
+> [changelog](#2026-10-13--rebuild-after-the-macro-leak-fix).
 
 ---
 
@@ -43,19 +38,21 @@ enforced end-to-end.
 | Rotation on that universe | `core/rotation_backtest.py --root data_all --universe-top 120 --oof data_all/model/m1_univ/entry_oof.parquet` | |
 
 Same window for every row: 2021-10-28 → 2026-10 (first OOS fold onward), costs 0.15%/side.
+Rows marked *pre-fix* were not re-run after the macro leak fix.
 
 | Setup | CAGR | Max DD (MTM) |
 |-------|------|--------------|
-| b7 on the research basket (spot prices, basket-trained m1) | +131.6% | −34.3% |
-| b7, universe-trained m1, alts restricted to the basket coins | +37.9% | −57.7% |
-| b7, universe-trained m1, 144 **random** universe coins (5 draws, median) | +14.9% | — |
-| **b7 on the point-in-time top-120 universe** | **−4.6%** | −73.8% |
-| b7-ens / core only / v5 on the same universe | −4.2% / +1.8% / −34.9% | −74.0% / −70.4% / −92.7% |
+| b7 on the research basket (spot prices, basket-trained m1) *(re-run 2026-10-13)* | +120.1% | −39.5% |
+| b7, universe-trained m1, alts restricted to the basket coins *(pre-fix)* | +37.9% | −57.7% |
+| b7, universe-trained m1, 144 **random** universe coins (5 draws, median) *(pre-fix)* | +14.9% | — |
+| **b7 on the point-in-time top-120 universe** *(re-run 2026-10-13)* | **−7.9%** | −76.1% |
+| b7-ens on the same universe *(re-run 2026-10-13)* | −7.2% | −76.7% |
+| core only / v5 on the same universe *(pre-fix)* | +1.8% / −34.9% | −70.4% / −92.7% |
 | **BTC buy & hold** | **+7.5%** | −76.7% |
 
-Universe-trained m1 has pooled OOS PR-AUC **0.073 vs a 0.081 base rate** — no skill. Top-60 and
-unrestricted universes give the same picture. Most of the basket edge came from hindsight coin
-selection plus a model trained on those coins.
+Universe-trained m1 has pooled OOS PR-AUC **0.077 vs a 0.081 base rate** (pre-fix 0.073) — no
+skill. Top-60 and unrestricted universes give the same picture. Most of the basket edge came from
+hindsight coin selection plus a model trained on those coins.
 
 **Catching more of the big runs (2026-10-13).** The rotation misses most mega-rallies on this
 universe (31 of 166 episodes of +500% within 90 days touched, none captured ≥3x), largely because
@@ -68,7 +65,7 @@ data after the 2026-10-12 update, same window:
 | `btc-trend` — BTC while above SMA50 & SMA200, else cash | **+30.1%** | **−24.6%** | — | — |
 | `greedy` — every liquid 90d breakout (vol ≥ 1.3x, ≥ $3M/day, ≥ 90d old), 1% each, + BTC trend | +27.2% | −39.9% | 75 / 17 | **$52.83** (sold $452.04, 8.6x) |
 | `greedy-alts` — same breakouts, idle cash stays cash | +7.6% | −40.5% | 75 / 17 | $52.83 |
-| `b7` (for reference) | −5.1% | −73.8% | 31 / 0 | $229.8 |
+| `b7` (for reference; CAGR / DD re-run 2026-10-13, episodes / ZEC pre-fix) | −7.9% | −76.1% | 31 / 0 | $229.8 |
 
 `greedy` is robust (10 random 70% coin subsets: median +28.2%, min +25.4%; 2x costs +23.4%;
 one-day delay +23.6%; both 2021-23 and 2024-26 positive), but almost all of its return is the BTC
@@ -81,7 +78,9 @@ exposure to the big runners.
 `core/rotation_paper.py` runs once a day after 00:00 UTC: it appends the newest closed bars,
 scores them with the final model (history keeps the OOF probs), builds the book with the same
 `build_weights` as the backtest, and saves the target for that day's Open. The paper P&L uses
-only targets saved by earlier runs — it is never back-filled.
+only targets saved by earlier runs — it is never back-filled. The record restarted on 2026-10-13
+with the retrained `m1_univ` (first target: the 2026-10-13 Open); the earlier record, made with the
+pre-fix model, is archived in `data_all/model/_preleak_20261013/paper/`.
 
 ```bash
 python core/rotation_paper.py --update --root data_all --universe-top 120 --preset b7-ens \
@@ -97,6 +96,45 @@ python core/rotation_paper.py --report --root data_all --universe-top 120 --oof 
 
 All backtest numbers are out-of-sample; costs 0.10% fee + 0.05% slippage per side. "Basket" = the
 144-coin research basket (survivorship-biased, see above); "universe" = `data_all`.
+
+### 2026-10-13 — rebuild after the macro leak fix
+- **Rebuilt and retrained** with the fixed `MacroSnapshot` (same label / CV / XGBoost args as before):
+  m1 (`entry_models_v2.py --models m1_100pct_60d --force`), short_v2 (`dataset.py --direction short
+  --tp 1.0 --sl 0.4 --horizon-days 30` → `train_entry_model.py --n-splits 5 --n-estimators 600
+  --max-depth 5 --min-child-weight 50 --colsample 0.5`), m1_univ (`universe_panel.py` →
+  `train_entry_model.py --n-splits 6 --lean`). Pre-fix models, OOFs and the old paper record are
+  kept in `data/model/_preleak_20261013/` and `data_all/model/_preleak_20261013/`.
+- **Feature set restored to the original 108** (`dataset.SCALE_FREE_PREFIXES`): `10a2ad9` had
+  swapped Pos_In / Dist_VWAP / Dist_High / Dist_Low for Donchian columns, so the pre-fix m1 and
+  short_v2 used 108 features but the pre-fix m1_univ used 96. All three now use the same 108; the
+  Donchian columns are still computed for the short-label filters.
+- **Fear & Greed can drop out silently**: `fetch_fear_greed` returns `None` on a timeout and the
+  panel is built without `FearGreed` (happened once during this rebuild; the short panel was rebuilt).
+  Check for `[Sentiment] Fear & Greed: N days` in the build log.
+- **Old vs new on the same data and labels** (labels identical row for row). The README tables
+  before this rebuild came from an older data snapshot, so the "old" column below is the pre-fix
+  OOF re-scored on today's data, not the earlier table values.
+
+  | Test | Pre-fix model | Fixed model |
+  |---|---|---|
+  | m1 OOS PR-AUC (base 0.141) | 0.187 | 0.224 (logistic 0.147) |
+  | m1 thr 0.60, TP +100% / SL −40% / 60d | 2,148 tr · PF 1.43 · +$14,714 | 2,154 tr · PF 1.53 · +$17,976 |
+  | m1 thr 0.90 | 421 tr · PF 1.53 · +$3,375 | 437 tr · PF 3.16 · +$10,989 |
+  | short_v2 OOS PR-AUC (base 0.054) | — | 0.102 (logistic 0.096) |
+  | short_v2 thr 0.50 (basket short backtest) | 712 tr · PF 3.30 · +$19,746 | 1,240 tr · PF 2.91 · +$27,947 |
+  | short_v2 at ~460 trades (old thr 0.60 / new thr 0.80) | PF 3.64 · +$14,168 | PF 3.35 · +$13,863 |
+  | Portfolio m1 thr 0.8 + short exit (`m1_short_exit`) | +40.0% CAGR · −85.8% MTM DD | +71.5% CAGR · −76.0% MTM DD |
+  | m1_univ OOS PR-AUC (base 0.081) | 0.073 | 0.077 |
+  | Rotation b7, universe top-120 | — | −7.9% CAGR · −76.1% DD |
+  | Rotation b6 / b7 / b7-ens, basket, full period | — | +187.3% / +198.8% / +184.1% CAGR · −46.3% / −39.5% / −42.1% DD |
+
+- **Read the m1 gain with care**: the fixed m1 scores higher than the leaky one, but its thr 0.90
+  P&L is concentrated in 2020–21 (+$8.7k of +$11.0k; the first fold trains on only 11k rows), and
+  the portfolio gain is almost all 2021 (+1119% vs +517%). The probabilities correlate only 0.78
+  with the pre-fix ones, so this is mostly a different fit, not a proven improvement. The
+  survivorship-free verdict is unchanged: m1_univ has no skill and rotation loses to BTC.
+- `btc-trend` / `greedy` / `greedy-alts` (model-free or nearly so) re-run unchanged: +30.1% /
+  +27.2% / +7.6%.
 
 ### 2026-10-13 — macro look-ahead fixes (review of `c542b8a` + `bee0883`)
 - **Yahoo look-ahead (`entry_finder.MacroSnapshot`)**: a day-D close (SP500, VIX, DXY, GOLD, OIL,
@@ -178,7 +216,7 @@ All backtest numbers are out-of-sample; costs 0.10% fee + 0.05% slippage per sid
 | Signal | OOS `oof_prob_xgb ≥ 0.60` |
 | Exit | Fixed **TP +100%** / **SL −40%** / **time 60d**, execute at next bar `Open` |
 | Costs | 0.1% fee + 0.05% slippage **per side** (0.30% round-trip) |
-| **Result (OOS)** | **1,688 trades · win 45.6% · exp +9.25%/trade · PF 1.62 · +$15,606** |
+| **Result (OOS)** | **2,154 trades · win 43.2% · exp +8.35%/trade · PF 1.53 · +$17,976** (re-run 2026-10-13) |
 
 Artifacts: `data/model/v2/m1_100pct_60d/` (model `entry_xgb.json`, `entry_oof.parquet`,
 `entry_model_meta.json`, SHAP `entry_shap.png`) and the baseline trade log in
@@ -197,21 +235,24 @@ signal (thr 0.60)** and change only how a trade is closed.
 
 | Entry model | Label | TF | Thr | Trades | Win% | Exp%/tr | PF | Total P&L |
 |-------------|-------|----|-----|-------:|-----:|--------:|---:|----------:|
-| Original | +100% / 30d / −40% | 4H | 0.60 | 708 | 45.5 | +8.73 | 1.69 | +$6,181 |
-| **m1 (baseline)** | **+100% / 60d / −40%** | 4H | **0.60** | **1,688** | **45.6** | **+9.25** | **1.62** | **+$15,606** |
-| m1 @ thr 0.70 | +100% / 60d / −40% | 4H | 0.70 | 1,322 | 47.2 | +10.07 | 1.68 | +$13,310 |
-| m1 @ thr 0.90 | +100% / 60d / −40% | 4H | 0.90 | 494 | 48.2 | +13.96 | 1.99 | +$6,896 |
-| m2 | +50% / 30d / −20% | 4H | 0.80 | 1,020 | 39.9 | +3.28 | 1.31 | +$3,342 |
-| m1 on daily | +100% / 60d / −40% | 1D | 0.80 | 522 | 43.9 | +6.91 | 1.46 | +$3,607 |
+| Original *(pre-fix)* | +100% / 30d / −40% | 4H | 0.60 | 708 | 45.5 | +8.73 | 1.69 | +$6,181 |
+| **m1 (baseline)** | **+100% / 60d / −40%** | 4H | **0.60** | **2,154** | **43.2** | **+8.35** | **1.53** | **+$17,976** |
+| m1 @ thr 0.70 | +100% / 60d / −40% | 4H | 0.70 | 1,575 | 45.1 | +10.34 | 1.68 | +$16,281 |
+| m1 @ thr 0.90 | +100% / 60d / −40% | 4H | 0.90 | 437 | 56.3 | +25.15 | 3.16 | +$10,989 |
+| m2 *(pre-fix)* | +50% / 30d / −20% | 4H | 0.80 | 1,020 | 39.9 | +3.28 | 1.31 | +$3,342 |
+| m1 on daily *(pre-fix)* | +100% / 60d / −40% | 1D | 0.80 | 522 | 43.9 | +6.91 | 1.46 | +$3,607 |
 
 **Takeaways:** the +100%/60d label on 4H is the sweet spot. Raising the threshold
 lifts expectancy and win rate but cuts total P&L (fewer trades) — **0.60
 maximizes total $**. The +50%/30d label and the daily rebuild are both weaker.
-XGBoost's OOS PR-AUC (~0.19) only modestly beats the logistic baseline (~0.15),
+XGBoost's OOS PR-AUC (~0.22) only modestly beats the logistic baseline (~0.15),
 so the edge is real but thin — the money comes from the asymmetric payoff, not
 from a high win rate.
 
 ### Exit strategies (all on the m1 entry, thr 0.60)
+
+*Pre-fix:* this whole table uses the pre-fix m1 and an older data snapshot; it was not re-run
+after the macro leak fix. Compare rows with each other, not with the re-run baseline above.
 
 | Exit strategy | Trades | Win% | Exp%/tr | PF | Total P&L | Notes |
 |---------------|-------:|-----:|--------:|---:|----------:|-------|
@@ -266,18 +307,42 @@ python core/entry_backtest.py \
 # 6) Visualize the actual trades
 python core/plot_m1_trades.py \
     --trades data/model/v2/m1_100pct_60d/thr06/entry_backtest_trades.csv
+
+# 7) Short model short_v2 (label: price halves = +100% short profit within 30d before -40%)
+python core/dataset.py --direction short --tp 1.0 --sl 0.4 --horizon-days 30 \
+    --out data/model/entry_panel_short.parquet
+python core/train_entry_model.py --panel data/model/entry_panel_short.parquet \
+    --n-splits 5 --embargo-days 3 --n-estimators 600 --max-depth 5 \
+    --min-child-weight 50 --colsample 0.5 --no-shap --out-dir data/model/short_v2
+python core/entry_backtest_short.py --oof data/model/short_v2/entry_oof.parquet \
+    --save-threshold 0.5 --out-dir data/model/short_v2
+
+# 8) Survivorship-free m1_univ (needs data_all/ from core/universe_download.py)
+python core/universe_panel.py
+python core/train_entry_model.py --panel data_all/model/entry_panel_univ.parquet \
+    --n-splits 6 --embargo-days 3 --lean --no-shap --out-dir data_all/model/m1_univ
+
+# 9) Portfolio: m1 entries, short-model exit
+python core/portfolio_backtest.py --oof data/model/v2/m1_100pct_60d/entry_oof.parquet \
+    --threshold 0.8 --exit-mode short --exit-probs data/model/short_v2/entry_oof.parquet \
+    --exit-thr 0.5 --min-dd 0.20 --horizon-days 365 --out-dir data/model/v2/m1_short_exit
 ```
 
 `entry_models_v2.py` is a thin orchestrator — it shells out to the audited
 `dataset.py → train_entry_model.py → entry_backtest.py` so the leakage-safe path
 is never re-implemented.
 
+> **Check every panel build log** for `[Sentiment] Fear & Greed: N days` and
+> `Macro table ready: 16 features`. If the Fear & Greed API times out, the panel is
+> built **without** `FearGreed` and no error is raised. The trained model then has
+> 107 features instead of 108. Re-run the build when that happens.
+
 ---
 
 ## 🤖 Use the pre-trained model on another machine (no retraining)
 
 The baseline model is committed to git, so a fresh clone can score coins
-**without** rebuilding the 634 MB training panel. Only two files are needed and
+**without** rebuilding the ~780 MB training panel. Only two files are needed and
 both are in the repo:
 
 ```text
@@ -396,7 +461,7 @@ backtest/
 | `entry_panel.parquet` | The pooled training panel (features + labels + weights) |
 | `entry_features.txt` | The exact feature column list |
 | `entry_shap.png` | SHAP summary — which features drive the model |
-| `thr06/entry_backtest_trades.csv` | The baseline trade log (1,688 trades) |
+| `thr06/entry_backtest_trades.csv` | The baseline trade log (2,154 trades) |
 
 ### Visualization files
 
