@@ -14,6 +14,17 @@ load_dotenv()
 
 
 class DataLoader:
+    # Days from FRED's observation date to its public release (conservative).
+    FRED_LAG_DAYS = {
+        "FEDFUNDS": 35,       # monthly avg, released 1st business day of next month
+        "M2": 60,             # monthly, released ~4 weeks after month end
+        "CPI": 45,            # monthly, released ~10-15th of next month
+        "FED_BAL": 2,         # weekly as of Wednesday, released Thursday
+        "RRP": 1,             # daily, released same afternoon
+        "INFLATION_10Y": 1,   # daily, end of day
+        "HY_SPREAD": 2,       # daily, ICE BofA posts with a 1-day delay
+    }
+
     def __init__(self, csv_path, symbol):
         self.csv_path = csv_path
         self.symbol = symbol
@@ -48,7 +59,13 @@ class DataLoader:
             try:
                 data = yf.download(ticker, start=start_date, end=end_date, progress=False)
                 if not data.empty:
-                    macro_df[f"{name}_Close"] = data['Close'].squeeze()
+                    close = data['Close'].squeeze()
+                    idx = pd.to_datetime(close.index)
+                    idx = idx.tz_localize(None) if idx.tz is not None else idx
+                    # N-1: day D's close is stamped D 00:00 but only known after the
+                    # US session (~21:00 UTC) -> make it available from D+1 00:00.
+                    close.index = idx.normalize() + pd.Timedelta(days=1)
+                    macro_df[f"{name}_Close"] = close[~close.index.duplicated(keep='last')]
                     print(f"  -> {name}: OK ({len(data)} rows)")
             except Exception as e:
                 print(f"  -> {name}: FAILED ({e})")
@@ -64,11 +81,21 @@ class DataLoader:
         }
 
         try:
-            fred_data = web.DataReader(list(fred_tickers.values()), "fred", start_date, end_date)
+            # fetch extra history so the lagged series already cover start_date
+            fred_start = pd.to_datetime(start_date) - pd.Timedelta(days=120)
+            fred_data = web.DataReader(list(fred_tickers.values()), "fred", fred_start, end_date)
             fred_data.index = pd.to_datetime(fred_data.index)
             # rename columns to readable names
             inv_map = {v: k for k, v in fred_tickers.items()}
             fred_data.rename(columns=inv_map, inplace=True)
+            # Publication lag (AGENTS.md Rule 2): FRED stamps an observation at the
+            # START of its period; shift each series to its real release date.
+            lagged = []
+            for col in fred_data.columns:
+                sr = fred_data[col].dropna()
+                sr.index = sr.index + pd.Timedelta(days=self.FRED_LAG_DAYS.get(col, 45))
+                lagged.append(sr)
+            fred_data = pd.concat(lagged, axis=1)
             macro_df = macro_df.join(fred_data, how="outer")
             print(f"  -> FRED Data: OK ({list(fred_tickers.keys())})")
         except Exception as e:
@@ -139,7 +166,9 @@ class DataLoader:
             fr_df['FundingRate'] = fr_df['fundingRate'].astype(float)
             fr_df = fr_df[['Date', 'FundingRate']].sort_values('Date')
 
-            fr_daily = fr_df.set_index('Date').resample('1D').mean()
+            # Mean of the funding prints in [D 00:00, D+1 00:00), stamped at D+1 00:00
+            # when the last of them is known (a left label would leak day D's funding).
+            fr_daily = fr_df.set_index('Date').resample('1D', label='right', closed='left').mean()
             print(f"  -> Funding Rate: OK ({len(fr_daily)} daily rows)")
             return fr_daily
         except Exception as e:

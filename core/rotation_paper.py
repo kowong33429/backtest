@@ -17,6 +17,7 @@ Nothing is sent to an exchange; this is a recorder.
 Usage:
     python core/rotation_paper.py --update                       # preset b7-ens on the research basket
     python core/rotation_paper.py --update --preset b7
+    python core/rotation_paper.py --update --root data_all --preset btc-trend   # best honest result (README)
     python core/rotation_paper.py --report                       # only print the paper record
 """
 import os
@@ -148,7 +149,8 @@ def paper_record(paper_dir, O):
 
 def main():
     ap = argparse.ArgumentParser(description='Daily paper trading of the rotation strategy')
-    ap.add_argument('--preset', default='b7-ens', choices=['b6', 'b7', 'b7-ens'])
+    ap.add_argument('--preset', default='b7-ens',
+                    choices=['b6', 'b7', 'b7-ens', 'btc-trend', 'greedy', 'greedy-alts'])
     ap.add_argument('--root', default='data')
     ap.add_argument('--oof', default='data/model/v2/m1_100pct_60d/entry_oof.parquet')
     ap.add_argument('--model-dir', default='data/model/v2/m1_100pct_60d')
@@ -171,7 +173,7 @@ def main():
     syms = sorted(oof['symbol'].unique())
     if args.universe_top:            # dynamic universe: every coin with data can enter the top-N later
         syms = sorted(set(syms) | {os.path.basename(d).upper() for d in glob.glob(os.path.join(base, args.root, '*'))
-                                   if os.path.isdir(d)} - {'BTCUSDT', 'MODEL'})
+                                   if os.path.isdir(d)} - {'BTCUSDT', 'MODEL', 'PAPER'})
 
     if args.update and not args.report:
         futures = args.root != 'data'
@@ -212,6 +214,9 @@ def main():
         O2 = pd.concat([O, pd.DataFrame(index=[today], columns=O.columns, dtype=float)])
         C2 = pd.concat([C, pd.DataFrame(index=[today], columns=C.columns, dtype=float)])
         data = {'oof': probs, 'syms': syms, 'O': O2, 'C': C2}
+        if rargs.breakout:            # greedy presets: breakout sleeve needs daily quote volume
+            V = rb.load_quote_volume(base, syms, args.root).loc[:last_full]
+            data['V'] = pd.concat([V, pd.DataFrame(index=[today], columns=V.columns, dtype=float)])
         if rargs.ensemble_near_high:
             import copy
             Ws = []

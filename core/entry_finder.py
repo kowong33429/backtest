@@ -240,8 +240,10 @@ class MacroSnapshot:
     """
     Builds a daily macro table that is safe to sample at any entry date:
       * Yahoo globals (SP500/DXY/GOLD/OIL/…) -> rolling returns / z-scores
-        (NEVER raw indices — tree models can't extrapolate).
-      * FRED (CPI/M2/…) -> shifted forward by `fred_lag_days` (publication lag),
+        (NEVER raw indices — tree models can't extrapolate). Each close is
+        stamped on the NEXT day (only known after the US session ends).
+      * FRED (CPI/M2/…) -> shifted forward to its release date (FRED_LAG_DAYS
+        per series, or one `fred_lag_days` for all if given),
         forward-filled, then converted to % change.
       * VIX and HY_SPREAD kept raw (naturally mean-reverting — the Rule #3
         exception).
@@ -255,8 +257,15 @@ class MacroSnapshot:
         "M2": "M2SL", "CPI": "CPIAUCSL", "FEDFUNDS": "FEDFUNDS",
         "HY_SPREAD": "BAMLH0A0HYM2",
     }
+    # Days from FRED's observation date to its public release (conservative).
+    FRED_LAG_DAYS = {
+        "M2": 60,          # monthly, released ~4 weeks after month end
+        "CPI": 45,         # monthly, released ~10-15th of next month
+        "FEDFUNDS": 35,    # monthly avg, released 1st business day of next month
+        "HY_SPREAD": 2,    # daily, ICE BofA posts with a 1-day delay
+    }
 
-    def __init__(self, start, end, fred_lag_days=35):
+    def __init__(self, start, end, fred_lag_days=None):
         self.start = pd.Timestamp(start) - pd.Timedelta(days=400)  # warmup for returns/YoY
         self.end = pd.Timestamp(end) + pd.Timedelta(days=2)
         self.fred_lag_days = fred_lag_days
@@ -282,6 +291,10 @@ class MacroSnapshot:
                         # aligns with the tz-naive daily range (else all-NaN).
                         si = pd.to_datetime(s.index)
                         s.index = si.tz_localize(None) if si.tz is not None else si
+                        # N-1: Yahoo stamps day D's close at D 00:00, but US markets
+                        # close ~21:00 UTC — so it is only known from D+1 00:00.
+                        s.index = s.index.normalize() + pd.Timedelta(days=1)
+                        s = s[~s.index.duplicated(keep='last')]
                         out[name] = s.reindex(idx).ffill()
                 except Exception as e:
                     print(f"  -> {name}: FAILED ({e})")
@@ -295,7 +308,14 @@ class MacroSnapshot:
                                   self.start, self.end)
             fred.rename(columns={v: k for k, v in self.FRED_TICKERS.items()}, inplace=True)
             # CRITICAL: shift timestamps forward to the real release date
-            fred.index = pd.to_datetime(fred.index) + pd.Timedelta(days=self.fred_lag_days)
+            fred.index = pd.to_datetime(fred.index)
+            lagged = []
+            for c in fred.columns:
+                sr = fred[c].dropna()
+                lag = self.fred_lag_days if self.fred_lag_days is not None else self.FRED_LAG_DAYS.get(c, 45)
+                sr.index = sr.index + pd.Timedelta(days=lag)
+                lagged.append(sr)
+            fred = pd.concat(lagged, axis=1)
             fred = fred.reindex(idx.union(fred.index)).sort_index().ffill().reindex(idx)
             for c in fred.columns:
                 out[c] = fred[c]

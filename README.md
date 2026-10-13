@@ -20,6 +20,17 @@ enforced end-to-end.
 > honest result so far is the plain BTC trend filter (`--preset btc-trend`, +30%/yr, −25% DD).
 > What changed and when: [Changelog](#-changelog).
 
+> ❗ **TODO — every number in this README predates the macro leak fix (2026-10-13).** Yahoo closes
+> and FRED releases used to reach bars before they were public (see the
+> [changelog](#2026-10-13--macro-look-ahead-fixes-review-of-c542b8a--bee0883)). The panels and models in
+> `data/model/` and `data_all/model/` were built with those leaky features. Before trusting any
+> result or the paper trader:
+> 1. Rebuild the panels (`core/dataset.py` for the basket / short panel, `core/universe_panel.py` for `data_all`).
+> 2. Retrain m1 (basket), short_v2 and m1_univ with `core/train_entry_model.py` (same args as before).
+> 3. Re-run `entry_backtest.py`, `portfolio_backtest.py` and `rotation_backtest.py` and update the tables below.
+> 4. Restart the paper record (`data_all/paper/`) with the retrained `m1_univ` — targets saved
+>    so far came from a model trained on leaky features.
+
 ---
 
 ## 🧯 Survivorship-free test (2026-10)
@@ -75,6 +86,8 @@ only targets saved by earlier runs — it is never back-filled.
 ```bash
 python core/rotation_paper.py --update --root data_all --universe-top 120 --preset b7-ens \
     --oof data_all/model/m1_univ/entry_oof.parquet --model-dir data_all/model/m1_univ --paper-dir data_all/paper
+python core/rotation_paper.py --update --root data_all --universe-top 120 --preset btc-trend \
+    --oof data_all/model/m1_univ/entry_oof.parquet --model-dir data_all/model/m1_univ --paper-dir data_all/paper/btc-trend
 python core/rotation_paper.py --report --root data_all --universe-top 120 --oof data_all/model/m1_univ/entry_oof.parquet --paper-dir data_all/paper
 ```
 
@@ -84,6 +97,26 @@ python core/rotation_paper.py --report --root data_all --universe-top 120 --oof 
 
 All backtest numbers are out-of-sample; costs 0.10% fee + 0.05% slippage per side. "Basket" = the
 144-coin research basket (survivorship-biased, see above); "universe" = `data_all`.
+
+### 2026-10-13 — macro look-ahead fixes (review of `c542b8a` + `bee0883`)
+- **Yahoo look-ahead (`entry_finder.MacroSnapshot`)**: a day-D close (SP500, VIX, DXY, GOLD, OIL,
+  US10Y, US2Y) was stamped at D 00:00 and merged into every 4H bar of day D, but the US session
+  closes ~21:00 UTC. Each close is now stamped D+1 00:00 (checked: VIX 2024-03-08 close appears on
+  2024-03-09).
+- **FRED lag per series (`MacroSnapshot.FRED_LAG_DAYS`)**: the single 35-day lag was too short for
+  M2 (~18 days of leak) and CPI (~5 days). Now M2 60, CPI 45, FEDFUNDS 35, HY_SPREAD 2 days; every
+  March 2024 value lands after its real release. `fred_lag_days=N` still forces one lag for all.
+  HY_SPREAD moves from 35 to 2 days, so that feature changes noticeably (not a leak, just more timely).
+- **`core/data_loader.py`** (used by `universal_researcher.py` / `research_agent.py` only): same
+  Yahoo fix, FRED had **no** lag at all → per-series lags (also WALCL 2, RRP 1, T10YIE 1), FRED fetched
+  120 days earlier so the lagged series cover the start; daily funding mean now stamped at the END
+  of its day (`label='right'`) instead of the start.
+- **`rotation_paper.py`**: `--preset` accepts `btc-trend`, `greedy`, `greedy-alts` (greedy loads quote
+  volume for the breakout sleeve); `PAPER` folder excluded from the symbol list.
+- **Still open (found in review, not fixed)**: backtests on `data_all` perps charge no funding (matters
+  if traded on perps, not spot); `barrier` mode fills SL at the level even on a gap down (other modes
+  use `min(Open, stop)`); `rotation_paper.paper_record` silently skips days with no saved target and
+  uses non-drift turnover; breadth counts delisted coins as below SMA when `--universe-top` is off.
 
 ### 2026-10-13 — survivorship-free universe, paper trading, greedy breakouts
 - **Added `core/universe_download.py`**: 4H perp klines + funding for all 703 crypto USDT-M perps ever
@@ -379,9 +412,11 @@ backtest/
 - **Rule #1 — N-1 shift:** `features.py` shifts every engineered feature by
   `.shift(1)`; funding is shifted in `dataset.py`. The only unshifted price is the
   execution `Open` of bar `n` (and the backtest executes at the *next* bar's Open).
-- **Rule #2 — Macro publication lag:** `entry_finder.MacroSnapshot` applies the
-  FRED release lag and forward-fills only (`.ffill()`); macro/F&G are merged
-  backward-asof so a bar never sees a future release.
+- **Rule #2 — Macro publication lag:** `entry_finder.MacroSnapshot` applies a
+  per-series FRED release lag (`FRED_LAG_DAYS`: M2 60, CPI 45, FEDFUNDS 35,
+  HY_SPREAD 2 days), stamps each Yahoo close on the next day, and forward-fills
+  only (`.ffill()`); macro/F&G are merged backward-asof so a bar never sees a
+  future release.
 - **Labeling:** `labeler.py` races a `+tp` / `−sl` / time triple-barrier forward
   from each bar's `Open`; same-bar TP&SL ambiguity resolves to SL (conservative).
 - **Leakage-safe CV:** `train_entry_model.py` uses **purged + embargoed
