@@ -1,0 +1,51 @@
+# config.yaml - shared by LEGACY variants and (later) NEW. Do NOT change to make a variant pass.
+# Values marked (given) were fixed by the reviewer. Values marked (assumed) are choices made while
+# building common_eval and are frozen here; changing them requires re-running every variant.
+
+costs:
+  FEE_PER_SIDE: 0.001            # (given)
+  SLIPPAGE_BASE: 0.002           # (given) per side, applied when liquidity is >= SLIP_REF_QV
+  SLIP_REF_QV: 10000000          # (assumed) 30d median daily quote volume at/above which slippage = base
+  SLIP_MAX_MULT: 5               # (assumed) slippage = base * clip(sqrt(SLIP_REF_QV / qv30), 1, SLIP_MAX_MULT)
+
+universe:
+  MIN_QUOTE_VOL_30D: 500000      # (given) median daily quote volume of the previous 30 days, lagged 1 day
+  data_root: data_all            # all USDT-M perps incl. delisted
+  drop_zero_volume_bars: true    # (assumed, stands in for "step B1" until new_research.md exists)
+
+portfolio:
+  MAX_POSITIONS: 10              # (given) equal slots, spot-style, no leverage
+  SIZING: equal_slot_of_equity   # slot = mark-to-market equity / MAX_POSITIONS
+
+exits:
+  native_long:   {TP: 1.00, SL: 0.40, H_BARS: 360}   # LEGACY m1 label/backtest rule (+100% / -40% / 60d)
+  native_short:  {TP: 1.00, SL: 0.40, H_BARS: 360}   # LEGACY short_v2 rule (mirrored barriers)
+  unified:       {TRAILING_STOP: 0.35, H_BARS: 540}  # (given) trailing from peak High + time stop H_NEW
+
+horizons:
+  LEGACY_BARS: 360               # 60d on 4H
+  H_NEW: 540                     # (given)
+  EMBARGO_BARS: 540              # (given) max(LEGACY_BARS, H_NEW)
+
+time:
+  bar: 4h
+  DEV_END: "2024-06-30"          # (given) development / tuning ends here
+  WF_START: "2022-01-01"         # (assumed) panel starts 2020-12-31, so 2022-01 is the earliest block with usable training data
+  WF_BLOCK_MONTHS: 6
+  FINAL_HOLDOUT_START: "2025-07-01"   # (given) LOCKED until step 8
+  HOLDOUT_LOCKED: true
+
+signals:
+  LEGACY_THRESHOLD: 0.60         # literal LEGACY baseline threshold, kept for every ladder step
+
+random:
+  N_RUNS: 1000
+  SEED: 20261018
+
+model:
+  xgb: {n_estimators: 300, learning_rate: 0.03, max_depth: 4, min_child_weight: 1.0, subsample: 0.8, colsample_bytree: 0.8, random_state: 42}
+
+new:                              # placeholders - filled when NEW exists
+  feature_set: null
+  model_params: null
+  label: null

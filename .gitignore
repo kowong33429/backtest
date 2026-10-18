@@ -29,3 +29,6 @@ Thumbs.db
 
 # survivorship-free universe (core/universe_download.py) - large
 data_all/
+
+# common_eval caches
+common_eval/.cache/
