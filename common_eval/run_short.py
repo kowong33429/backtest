@@ -20,8 +20,8 @@ SHORT_XGB = dict(n_estimators=600, learning_rate=0.03, max_depth=5, min_child_we
                  colsample_bytree=0.5, random_state=42)           # LEGACY short_v2 hyper-parameters
 
 
-def evaluate(name, mk, o, thr, cfg, short_pnl, results):
-    eng = Engine(mk, cfg, short_pnl=short_pnl)
+def evaluate(name, mk, o, thr, cfg, short_pnl, results, funding=True):
+    eng = Engine(mk, cfg, short_pnl=short_pnl, funding=funding)
     sigdf = ad.to_signals(o, thr, 'short', cfg)
     sig = Signals.from_frame(mk, sigdf)
     rec = {'name': name, 'n_signals': sig.n, 'thr': thr, 'sig_df': sigdf, 'pool_mask': ad.pool_mask(mk, o, cfg), 'short_pnl': short_pnl}
@@ -48,7 +48,7 @@ def main():
     mk_bk, mk_all = load_market(cfg, root='data'), load_market(cfg)
     results = {}
     o_bk = ad.read_oof(os.path.join(ROOT, 'data/model/short_v2/entry_oof.parquet'))
-    evaluate('S0_AS_IS (reciprocal P&L)', mk_bk, o_bk, thr, cfg, 'legacy_reciprocal', results)
+    evaluate('S0_AS_IS (reciprocal P&L)', mk_bk, o_bk, thr, cfg, 'legacy_reciprocal', results, funding=False)  # as-is: no funding
     evaluate('S1_+H3 true short P&L', mk_bk, o_bk, thr, cfg, 'true', results)
     panel = wf.load_panel(os.path.join(ROOT, 'data_all/model/entry_panel_univ_short.parquet'), cfg)
     feats_all = [c for c in panel.columns if c not in wf.NON_FEAT]

@@ -7,6 +7,8 @@ costs:
   SLIPPAGE_BASE: 0.002           # (given) per side, applied when liquidity is >= SLIP_REF_QV
   SLIP_REF_QV: 10000000          # (assumed) 30d median daily quote volume at/above which slippage = base
   SLIP_MAX_MULT: 5               # (assumed) slippage = base * clip(sqrt(SLIP_REF_QV / qv30), 1, SLIP_MAX_MULT)
+  FUNDING_SIDES: [short]         # (approved 2026-10-18) funding charged/credited on these sides; UP is spot -> none
+  FUNDING_DIR: data_funding      # raw settlements <SYM>.csv (Date, Funding_Rate); entry < t < exit only
 
 universe:
   MIN_QUOTE_VOL_30D: 500000      # (given) median daily quote volume of the previous 30 days, lagged 1 day

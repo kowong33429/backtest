@@ -7,9 +7,10 @@ from .config import ROOT, dev_cut, guard_holdout
 
 
 class Market:
-    def __init__(self, times, symbols, O, H, L, C, qv30, cfg):
+    def __init__(self, times, symbols, O, H, L, C, qv30, cfg, fund_events=None):
         self.times, self.symbols = times, list(symbols)
         self.O, self.H, self.L, self.C, self.qv30 = O, H, L, C, qv30
+        self.fund_events = fund_events      # {j: (settlement times int64 ns, rates)}; None = funding not loaded
         self.cfg = cfg
         self.sym_idx = {s: i for i, s in enumerate(self.symbols)}
         self.t_idx = {t: i for i, t in enumerate(times)}
@@ -34,6 +35,22 @@ def _read(path, drop_zero):
     if drop_zero:
         d = d[d['Volume'] > 0]
     return d[['Date', 'Open', 'High', 'Low', 'Close', 'Quote_Volume']].set_index('Date')
+
+
+def load_funding_events(cfg, times, symbols):
+    """Raw funding settlements per symbol (Date, Funding_Rate) from FUNDING_DIR, inside [times[0], cut).
+    Symbols without a file (no perp) get no events."""
+    d = os.path.join(ROOT, cfg['costs']['FUNDING_DIR'])
+    cut = dev_cut(cfg)
+    ev = {}
+    for k, s in enumerate(symbols):
+        p = os.path.join(d, f'{s}.csv')
+        if not os.path.exists(p):
+            continue
+        f = pd.read_csv(p, parse_dates=['Date'])
+        f = f[(f['Date'] < cut) & (f['Date'] >= times[0])].sort_values('Date')
+        ev[k] = (f['Date'].values.astype('datetime64[ns]').astype(np.int64), f['Funding_Rate'].values.astype(float))
+    return ev
 
 
 def load_market(cfg, root=None, symbols=None, start='2021-10-01', suffix='_4h_full.csv'):
@@ -67,4 +84,5 @@ def load_market(cfg, root=None, symbols=None, start='2021-10-01', suffix='_4h_fu
     med = V.rolling(30, min_periods=20).median().shift(1)         # previous days only
     day = times.normalize()
     q = med.reindex(med.index.union(day.unique())).ffill().reindex(day).values
-    return Market(times, keep, O, H, L, C, q, cfg)
+    fund = load_funding_events(cfg, times, keep) if cfg['costs'].get('FUNDING_SIDES') else None
+    return Market(times, keep, O, H, L, C, q, cfg, fund)

@@ -37,11 +37,39 @@ def _first(mask):
     return k if mask[k] else -1
 
 
+BAR_NS = np.int64(4 * 3600 * 10 ** 9)
+CLOSE_EXITS = ('TIME', 'END', 'DELIST')
+
+
 class Engine:
-    def __init__(self, mk, cfg, short_pnl='true'):
+    def __init__(self, mk, cfg, short_pnl='true', funding=True):
         self.mk, self.cfg, self.short_pnl = mk, cfg, short_pnl
         self.OT, self.HT, self.LT, self.CT = (np.ascontiguousarray(a.T) for a in (mk.O, mk.H, mk.L, mk.C))
         self.cache = {}
+        sides = {'long': 1, 'short': -1}
+        self.fund_sides = {sides[s] for s in (cfg['costs'].get('FUNDING_SIDES') or [])} if funding else set()
+        self.fev = getattr(mk, 'fund_events', None) if self.fund_sides else None
+        self.t_ns = np.asarray(mk.times.values).astype('datetime64[ns]').astype(np.int64) if self.fev is not None else None
+
+    def funding_path(self, side, i, j, xb, why):
+        """Cumulative funding return per bar i..xb of a position opened at Open[i] (fraction of entry notional).
+        Only settlements with entry_time < t < exit_time count. exit_time = Close of bar xb for close exits;
+        for intrabar exits (stop / target / trail) the exact time is unknown, so exit_time = Open of bar xb.
+        Each settlement is scaled by Close[bar of t] / entry price (notional follows the price).
+        A long PAYS positive funding, a short RECEIVES it."""
+        if self.fev is None or side not in self.fund_sides or j not in self.fev:
+            return None
+        ts, rates = self.fev[j]
+        t_in = self.t_ns[i]
+        t_out = self.t_ns[xb] + (BAR_NS if why in CLOSE_EXITS else 0)
+        a, b = np.searchsorted(ts, t_in, side='right'), np.searchsorted(ts, t_out, side='left')   # strict on both ends
+        f = np.zeros(xb - i + 1)
+        if b > a:
+            bar = np.searchsorted(self.t_ns, ts[a:b], side='right') - 1                         # bar containing t
+            c = self.CT[j, bar]
+            c = np.where(np.isfinite(c), c, self.OT[j, i])
+            np.add.at(f, bar - i, -side * rates[a:b] * c / self.OT[j, i])
+        return np.cumsum(f)
 
     # ---- exit resolution -------------------------------------------------
     def resolve(self, mode, side, i, j):
@@ -158,9 +186,13 @@ class Engine:
                     if not np.isfinite(sx):
                         sx = se
                     r = self.net_ret(side, e, xp, se, sx)
+                    fp = self.funding_path(side, t, j, xb, why)
+                    fr = float(fp[-1]) if fp is not None else 0.0
+                    r += fr
                     cash -= size
                     held.add(j)
-                    p = dict(j=j, side=side, i=t, e=e, se=se, size=size, xb=xb, xp=xp, why=why, r=r, sx=sx, last=e)
+                    p = dict(j=j, side=side, i=t, e=e, se=se, size=size, xb=xb, xp=xp, why=why, r=r, sx=sx, last=e,
+                             fp=fp, fr=fr)
                     pos.append(p)
                     trades.append(p)
             val, keep = 0.0, []                                 # close of bar t: realize exits, mark the rest
@@ -172,7 +204,8 @@ class Engine:
                     c = self.CT[p['j'], t]
                     if np.isfinite(c):
                         p['last'] = c
-                    val += p['size'] * (1 + self.mark(p['side'], p['e'], p['se'], p['last']))
+                    acc = p['fp'][t - p['i']] if p['fp'] is not None else 0.0
+                    val += p['size'] * (1 + self.mark(p['side'], p['e'], p['se'], p['last']) + acc)
                     keep.append(p)
             pos = keep
             eq[t] = cash + val
@@ -182,6 +215,6 @@ class Engine:
             'symbol': mk.symbols[p['j']], 'side': 'long' if p['side'] == 1 else 'short',
             'entry_time': mk.times[p['i']], 'exit_time': mk.times[p['xb']], 'bars': p['xb'] - p['i'],
             'entry_px': p['e'], 'exit_px': p['xp'], 'reason': p['why'], 'ret': p['r'],
-            'pnl': p['size'] * p['r'], 'size': p['size'],
+            'pnl': p['size'] * p['r'], 'size': p['size'], 'funding_ret': p['fr'],
             'cost': p['size'] * (2 * f + p['se'] + p['sx'])} for p in trades])
         return td, pd.Series(eq, index=mk.times)
