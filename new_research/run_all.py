@@ -184,6 +184,7 @@ def new_cfg(trailing=None, fee_mult=1.0, h_bars=None):
         c['exits']['unified']['TRAILING_STOP'] = trailing
     if h_bars is not None:
         c['exits']['native_long']['H_BARS'] = h_bars
+        c['exits']['native_short']['H_BARS'] = h_bars
         c['exits']['unified']['H_BARS'] = h_bars
     c['costs']['FEE_PER_SIDE'] *= fee_mult
     c['costs']['SLIPPAGE_BASE'] *= fee_mult
@@ -207,7 +208,9 @@ def signals(o, info, model, regime=False, side='long', top_per_day=None):
         if thr is None:
             continue
         s = t[t[model] >= thr]
-        if regime:
+        if regime == 'btc_down':                                  # DOWN variant: only while BTC is below its EMA1200
+            s = s[s['btc_trend'] < 0]
+        elif regime:
             s = s[s['btc_trend'] > CFG['new']['BTC_TREND_MIN']]
         rows.append(s)
     s = pd.concat(rows) if rows else o.iloc[:0]
@@ -265,6 +268,72 @@ def stage_backtest():
     return res
 
 
+def stage_backtest_down():
+    """DOWN = futures 1x short with funding (common_eval FUNDING_SIDES). Native exit = NEW down label barriers."""
+    from common_eval.data import load_market
+    from new_research.models import run_walkforward
+    mods = load('models')
+    mk = load_market(CFG)
+    o, info = mods['down']['oof'], mods['down']['info']
+    res, base = {}, new_cfg()
+    for model, name in (('rule', 'NEW_DOWN_BASELINE'), ('logistic', 'NEW_DOWN_LOGISTIC'), ('xgb', 'NEW_DOWN_XGB')):
+        for regime in (False, 'btc_down'):
+            key = f"{name}{'_btcdown' if regime else ''}"
+            res[key] = run_variant(mk, base, signals(o, info, model, regime, side='short'))
+            w, u = res[key]['native']['wf'], res[key]['unified']['wf']
+            print(f"{key:26s} sig {res[key]['n_signals']:6d} | native n={w['trades']} exp={w['expectancy']*100:+.2f}% CAGR={w['CAGR']*100:+.1f}% DD={w['MaxDD']*100:.1f}% "
+                  f"| unified n={u['trades']} exp={u['expectancy']*100:+.2f}% CAGR={u['CAGR']*100:+.1f}% DD={u['MaxDD']*100:.1f}%", flush=True)
+    rob = {}
+    p = panel()
+    for model in ('logistic', 'xgb', 'rule'):
+        sx = signals(o, info, model, False, side='short')
+        rob[f'{model}_cost_x2'] = run_variant(mk, new_cfg(fee_mult=2.0), sx)
+        rob[f'{model}_trail_0.28'] = run_variant(mk, new_cfg(trailing=0.28), sx)
+        rob[f'{model}_trail_0.42'] = run_variant(mk, new_cfg(trailing=0.42), sx)
+    prof = load('profiles')
+    for suf, h, sl in (('_h432', 432, None), ('_h648', 648, None), ('_mae20', None, 0.16), ('_mae30', None, 0.24)):
+        ro, ri = run_walkforward(p, 'down', models=('rule', 'logistic', 'xgb'), rule=prof['rule_down'], label_col='down' + suf, verbose=False)
+        for fi in ri:
+            fi.pop('_xgb_model', None)
+        c = new_cfg(h_bars=h)
+        if sl is not None:
+            c['exits']['native_short']['SL'] = sl                  # short stop at price x 1/(1-SL): 0.16 -> x1.19, 0.24 -> x1.32
+        for model in ('logistic', 'xgb', 'rule'):
+            rob[f'{model}_label{suf}'] = run_variant(mk, c, signals(ro, ri, model, False, side='short'))
+        print('  robustness', suf, {m: round(rob[f'{m}_label{suf}']['native']['wf']['expectancy'], 4) for m in ('logistic', 'xgb', 'rule')}, flush=True)
+    res['_robustness'] = rob
+    save('backtest_down', res)
+    return res
+
+
+def stage_random_down(n=None):
+    from multiprocessing import Pool
+    from common_eval.data import load_market
+    from common_eval.run_bench import _run
+    n = n or CFG['random']['N_RUNS']
+    bt, mods = load('backtest_down'), load('models')
+    mk = load_market(CFG)
+    o = mods['down']['oof']
+    pool = np.zeros((mk.T, mk.N), bool)
+    t = np.fromiter((mk.idx(x) for x in o['day'] + pd.Timedelta(days=1)), int, len(o))
+    j = np.fromiter((mk.sym_idx.get(s, -1) for s in o['symbol']), int, len(o))
+    ok = (t >= 0) & (j >= 0)
+    pool[t[ok], j[ok]] = True
+    out = {}
+    for k in ('NEW_DOWN_LOGISTIC', 'NEW_DOWN_XGB', 'NEW_DOWN_BASELINE', 'NEW_DOWN_LOGISTIC_btcdown', 'NEW_DOWN_XGB_btcdown'):
+        rec = bt[k]
+        rate = rec['n_signals'] / max(1, int((pool & mk.elig).sum()))
+        res = {}
+        with Pool(8, initializer=_init_new, initargs=(rec['sig_df'].assign(side='long'), pool, rate, -1)) as P:
+            for mode in ('rate', 'timing'):
+                for ex in ('native', 'unified'):
+                    res[(mode, ex)] = pd.DataFrame(P.map(_run, [(CFG['random']['SEED'] + i, mode, ex) for i in range(n)], chunksize=10))
+                    print(f'  RANDOM {k} {mode}/{ex}: mean trades {res[(mode, ex)].trades.mean():.0f}', flush=True)
+        out[k] = res
+    save('random_down', out)
+    return out
+
+
 def stage_random(n=None, key='NEW_XGB'):
     """RANDOM matched to NEW_XGB: same scored pool (coin-days in the panel), same signal rate / same per-bar count."""
     from multiprocessing import Pool
@@ -297,13 +366,13 @@ def stage_random(n=None, key='NEW_XGB'):
     return out
 
 
-def _init_new(ref_sig, pool, rate):
+def _init_new(ref_sig, pool, rate, side=1):
     from common_eval import run_bench as rb
     from common_eval.data import load_market
     from common_eval.backtest import Engine, Signals
     cfg = new_cfg()
     mk = load_market(cfg)
-    rb.G.update(cfg=cfg, mk=mk, eng=Engine(mk, cfg), ref=Signals.from_frame(mk, ref_sig), pool=pool, rate=rate, side=1)
+    rb.G.update(cfg=cfg, mk=mk, eng=Engine(mk, cfg), ref=Signals.from_frame(mk, ref_sig), pool=pool, rate=rate, side=side)
 
 
 if __name__ == '__main__':

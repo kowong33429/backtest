@@ -39,4 +39,3 @@ data_new_holdout/
 data_funding/
 data_funding_holdout/
 new_research/.cache/
-new_research/models_frozen/

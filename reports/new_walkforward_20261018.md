@@ -166,7 +166,31 @@ NEW_XGB ขาดทุนทุกการเปลี่ยนพาราม
 
 **ข้อสรุป: ยังไม่มี edge.** XGBoost ไม่ชนะ baseline (ทั้ง logistic และกฎ) จึงไม่แนะนำให้ใช้ XGBoost
 
-## ฝั่ง DOWN: ยังไม่ backtest — รออนุมัติการแก้ common_eval
+## ฝั่ง DOWN (เพิ่มหลังอนุมัติ funding — commit cebee68)
+
+funding ถูกเพิ่มใน common_eval ตามที่อนุมัติ โดยมีเงื่อนไขเพิ่ม: นับเฉพาะ settlement ที่ entry_time < t < exit_time (คิดจาก event ดิบ ไม่ใช่ผลรวมต่อแท่ง); exit กลางแท่ง (stop/TP/trail) ใช้เวลาเปิดของแท่งที่ออก; มีเทสต์กรณี settlement ก่อน/ตรงเวลาเข้าและตรงเวลาออก (รวม 7 เทสต์ funding, ทั้งหมด 21 เทสต์ผ่าน)
+
+**LEGACY_FIXED short เมื่อคิด funding (S0 คงเดิมไม่มี funding):** S1 +0.77% → +0.08%, S2 +1.49% → +0.77%, **S4 (= LEGACY_FIXED short) +2.56% → +2.70%/เทรด, CAGR −2.3%, MaxDD −89.9%** (native); unified +0.02%
+
+**NEW DOWN (futures 1x, funding, 2022-01 → 2025-06):**
+
+| รุ่น | exit | เทรด | expectancy | CAGR | MaxDD | RANDOM pct (จับเวลา / ความถี่) | ต้นทุน 2× | ตัด top-3 | funding/เทรด |
+|---|---|---|---|---|---|---|---|---|---|
+| NEW_DOWN_BASELINE | native | 392 | +2.08% | +4.8% | −75.5% | 88.6 / 90.2 | +1.88% | +1.67% | −0.65% |
+| NEW_DOWN_BASELINE | unified | 688 | +0.04% | −13.4% | −82.2% | 41.7 / 46.3 | −0.16% | −0.29% | −0.38% |
+| NEW_DOWN_LOGISTIC | native | 206 | +0.04% | −15.7% | −80.3% | 89.4 / 29.6 | −0.16% | −0.75% | −0.73% |
+| NEW_DOWN_XGB | native | 209 | +1.46% | −6.1% | −76.4% | 96.5 / 75.1 | +1.26% | +0.67% | +0.93% |
+| NEW_DOWN_XGB | unified | 271 | +0.64% | −10.4% | −72.2% | 96.9 / 72.8 | +0.44% | −0.11% | +0.74% |
+| + ตัวกรอง BTC < EMA1200 | | 48–185 | แย่ลงทุกโมเดล | | | | | | |
+| LEGACY_FIXED short | native | 217 | +2.70% | −2.3% | −89.9% | | | | |
+
+- **ไม่มีรุ่น DOWN ใดผ่านเกณฑ์หัวข้อ 11:** ไม่มีรุ่นที่ expectancy สูงกว่า LEGACY_FIXED short โดย CI ไม่คร่อม 0 และไม่มีรุ่นที่ชนะ RANDOM P95 ทั้งสองแบบ
+- ความทนทานต่อ label ±20% (native): baseline บวกทั้ง 4 แบบ (+1.4% ถึง +2.9%); XGB บวกทั้ง 4 (+0.1% ถึง +3.5%); logistic ลบ 2 จาก 4
+- ผลรายปี baseline: 2022 +233%, 2023 −58%, 2024 −24%, 2025H1 +11%; 12 เดือนหลัง development −1.1%/เทรด
+- funding ที่ short ได้รับเฉลี่ยติดลบสำหรับ baseline/logistic (−0.7%/เทรด) — กฎเลือกเหรียญที่เพิ่งขึ้นแรงซึ่งมักมี funding ติดลบหลังราคากลับตัว (short ต้องจ่าย)
+- สมมติฐาน DOWN สำหรับ holdout: **NEW_DOWN_BASELINE (native)** — เหตุผลใน `reports/holdout_hypotheses.md`
+
+### (บันทึกเดิม) ข้อเสนอแก้ common_eval
 
 spec หัวข้อ 9 กำหนดให้ DOWN คิด funding และผู้ใช้สั่งให้คิด funding ฝั่ง short ทั้ง LEGACY และ NEW แต่ common_eval (d7e94e7) ยังไม่รองรับ ผมจึง**ไม่ได้แก้** แต่เตรียม diff ไว้ที่ `proposals/common_eval_funding.diff`:
 

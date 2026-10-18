@@ -51,7 +51,7 @@ def fit_final(target):
            'thr_logistic': float(np.quantile(lr.predict_proba(sc.transform(Zv))[:, 1], 1 - top)),
            'fit_last_day': p.loc[fit, 'day'].max(), 'valid_days': (p.loc[valid, 'day'].min(), p.loc[valid, 'day'].max())}
     os.makedirs(FROZEN, exist_ok=True)
-    pickle.dump(obj, open(os.path.join(FROZEN, f'{target}.pkl'), 'wb'))
+    pickle.dump(obj, open(os.path.join(FROZEN, f'dryrun_{target}.pkl'), 'wb'))
     return obj
 
 
@@ -91,8 +91,8 @@ def main():
     if not a.dev_dry_run:
         raise SystemExit('live scoring needs data after the holdout start; it is implemented in step 10 together with '
                          'the holdout data loader.')
-    path = os.path.join(FROZEN, f'{a.target}.pkl')
-    m = fit_final(a.target) if (a.refit or not os.path.exists(path)) else pickle.load(open(path, 'rb'))
+    path = os.path.join(FROZEN, f'new_{a.target}.pkl')                # frozen at tag new-frozen (new_research/freeze.py)
+    m = fit_final(a.target) if a.refit else pickle.load(open(path, 'rb'))
     from new_research.run_all import panel
     p = panel()
     day = p['day'].max()
