@@ -1,10 +1,10 @@
 """NEW scanner (spec Output 4): coins that pass the UP / DOWN model now, ranked by score, with the top-3 reasons.
 
-Usable only after step 10: while config.yaml has time.HOLDOUT_LOCKED = true it refuses to score live data.
-`--dev-dry-run` scores the LAST DEVELOPMENT DAY (2025-06-30) instead, to check the pipeline without the holdout.
+`--latest` (only after the step-10 holdout run exists) scores the newest day in data_new_holdout with the models frozen
+at tag new-frozen. `--dev-dry-run` scores the last development day (2025-06-30).
 
     python scanner.py --dev-dry-run --target up --top 20
-    python scanner.py --target up            # after step 10 only
+    python scanner.py --latest --target up --model logistic
 """
 import argparse
 import os
@@ -82,19 +82,25 @@ def main():
     ap.add_argument('--model', choices=['xgb', 'logistic'], default='logistic')
     ap.add_argument('--top', type=int, default=20)
     ap.add_argument('--dev-dry-run', action='store_true')
+    ap.add_argument('--latest', action='store_true', help='after step 10: score the newest day in data_new_holdout')
     ap.add_argument('--refit', action='store_true')
     a = ap.parse_args()
     cfg = load_config()
-    if not a.dev_dry_run and cfg['time']['HOLDOUT_LOCKED']:
-        raise SystemExit('scanner.py is disabled until step 10 (config.yaml time.HOLDOUT_LOCKED = true). '
-                         'Use --dev-dry-run to check it on the last development day.')
-    if not a.dev_dry_run:
-        raise SystemExit('live scoring needs data after the holdout start; it is implemented in step 10 together with '
-                         'the holdout data loader.')
+    done10 = os.path.exists(os.path.join(ROOT, 'new_research', '.cache', 'holdout', 'holdout_results.pkl'))
+    if a.latest and not done10:
+        raise SystemExit('scanner.py --latest is disabled until step 10 (holdout run) has been completed.')
+    if not (a.dev_dry_run or a.latest):
+        raise SystemExit('choose --dev-dry-run (last development day) or --latest (after step 10).')
     path = os.path.join(FROZEN, f'new_{a.target}.pkl')                # frozen at tag new-frozen (new_research/freeze.py)
     m = fit_final(a.target) if a.refit else pickle.load(open(path, 'rb'))
-    from new_research.run_all import panel
-    p = panel()
+    if a.latest:
+        from new_research.holdout import holdout_panel
+        p = holdout_panel()
+        print('NOTE: no NEW variant passed the pre-registered holdout criteria (reports/new_holdout_20261018.md). '
+              'This list is for research only - not a trading signal.')
+    else:
+        from new_research.run_all import panel
+        p = panel()
     day = p['day'].max()
     rows = p[p['day'] == day].set_index('symbol')
     if a.target == 'up':
@@ -103,7 +109,7 @@ def main():
     s, why = score(rows, m, a.model)
     out = pd.DataFrame({'score': s, 'passes': s >= m[f'thr_{a.model}'], 'top3_reasons': why,
                         'sector': rows['sector'], 'close': rows['close']}, index=rows.index).sort_values('score', ascending=False)
-    print(f'{a.target.upper()} {a.model} on {day.date()} (dev dry run) | threshold {m[f"thr_{a.model}"]:.4f} | '
+    print(f'{a.target.upper()} {a.model} on {day.date()} ({"latest" if a.latest else "dev dry run"}) | threshold {m[f"thr_{a.model}"]:.4f} | '
           f'{int(out.passes.sum())} of {len(out)} coins pass')
     print(out.head(a.top).to_string())
 
