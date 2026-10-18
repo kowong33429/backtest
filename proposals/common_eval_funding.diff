@@ -1,0 +1,209 @@
+diff -ru --strip-trailing-cr -x __pycache__ -x .cache -x '*.pyc' common_eval/backtest.py common_eval/backtest.py
+--- common_eval/backtest.py	2026-10-18 17:38:37.877249100 +0700
++++ common_eval/backtest.py	2026-10-18 18:24:44.326174900 +0700
+@@ -38,10 +38,29 @@
+ 
+ 
+ class Engine:
+-    def __init__(self, mk, cfg, short_pnl='true'):
++    def __init__(self, mk, cfg, short_pnl='true', funding=True):
+         self.mk, self.cfg, self.short_pnl = mk, cfg, short_pnl
+         self.OT, self.HT, self.LT, self.CT = (np.ascontiguousarray(a.T) for a in (mk.O, mk.H, mk.L, mk.C))
+         self.cache = {}
++        sides = {'long': 1, 'short': -1}
++        self.fund_sides = {sides[s] for s in (cfg['costs'].get('FUNDING_SIDES') or [])} if funding else set()
++        fund = getattr(mk, 'fund', None)
++        self.FT = np.ascontiguousarray(np.nan_to_num(fund).T) if (fund is not None and self.fund_sides) else None
++
++    def funding_path(self, side, i, j, xb, why):
++        """Cumulative funding return of a position opened at Open[i], per bar i..xb (as a fraction of the entry
++        notional). Settlements are scaled by price / entry price (notional moves with the price). A long PAYS
++        positive funding, a short RECEIVES it. The exit bar's settlement counts only if the exit is at its Close."""
++        if self.FT is None or side not in self.fund_sides:
++            return None
++        last = xb if why in ('TIME', 'END', 'DELIST') else xb - 1
++        n = xb - i + 1
++        f = np.zeros(n)
++        if last >= i:
++            c = self.CT[j, i:last + 1]
++            c = np.where(np.isfinite(c), c, self.OT[j, i])
++            f[:last - i + 1] = -side * self.FT[j, i:last + 1] * c / self.OT[j, i]
++        return np.cumsum(f)
+ 
+     # ---- exit resolution -------------------------------------------------
+     def resolve(self, mode, side, i, j):
+@@ -158,9 +177,13 @@
+                     if not np.isfinite(sx):
+                         sx = se
+                     r = self.net_ret(side, e, xp, se, sx)
++                    fp = self.funding_path(side, t, j, xb, why)
++                    fr = float(fp[-1]) if fp is not None else 0.0
++                    r += fr
+                     cash -= size
+                     held.add(j)
+-                    p = dict(j=j, side=side, i=t, e=e, se=se, size=size, xb=xb, xp=xp, why=why, r=r, sx=sx, last=e)
++                    p = dict(j=j, side=side, i=t, e=e, se=se, size=size, xb=xb, xp=xp, why=why, r=r, sx=sx, last=e,
++                             fp=fp, fr=fr)
+                     pos.append(p)
+                     trades.append(p)
+             val, keep = 0.0, []                                 # close of bar t: realize exits, mark the rest
+@@ -172,7 +195,8 @@
+                     c = self.CT[p['j'], t]
+                     if np.isfinite(c):
+                         p['last'] = c
+-                    val += p['size'] * (1 + self.mark(p['side'], p['e'], p['se'], p['last']))
++                    acc = p['fp'][t - p['i']] if p['fp'] is not None else 0.0
++                    val += p['size'] * (1 + self.mark(p['side'], p['e'], p['se'], p['last']) + acc)
+                     keep.append(p)
+             pos = keep
+             eq[t] = cash + val
+@@ -182,6 +206,6 @@
+             'symbol': mk.symbols[p['j']], 'side': 'long' if p['side'] == 1 else 'short',
+             'entry_time': mk.times[p['i']], 'exit_time': mk.times[p['xb']], 'bars': p['xb'] - p['i'],
+             'entry_px': p['e'], 'exit_px': p['xp'], 'reason': p['why'], 'ret': p['r'],
+-            'pnl': p['size'] * p['r'], 'size': p['size'],
++            'pnl': p['size'] * p['r'], 'size': p['size'], 'funding_ret': p['fr'],
+             'cost': p['size'] * (2 * f + p['se'] + p['sx'])} for p in trades])
+         return td, pd.Series(eq, index=mk.times)
+diff -ru --strip-trailing-cr -x __pycache__ -x .cache -x '*.pyc' common_eval/data.py common_eval/data.py
+--- common_eval/data.py	2026-10-18 17:37:22.053877700 +0700
++++ common_eval/data.py	2026-10-18 18:24:44.326174900 +0700
+@@ -7,9 +7,10 @@
+ 
+ 
+ class Market:
+-    def __init__(self, times, symbols, O, H, L, C, qv30, cfg):
++    def __init__(self, times, symbols, O, H, L, C, qv30, cfg, fund=None):
+         self.times, self.symbols = times, list(symbols)
+         self.O, self.H, self.L, self.C, self.qv30 = O, H, L, C, qv30
++        self.fund = fund                     # [T, N] sum of funding settlements inside each bar (None = no funding)
+         self.cfg = cfg
+         self.sym_idx = {s: i for i, s in enumerate(self.symbols)}
+         self.t_idx = {t: i for i, t in enumerate(times)}
+@@ -36,6 +37,27 @@
+     return d[['Date', 'Open', 'High', 'Low', 'Close', 'Quote_Volume']].set_index('Date')
+ 
+ 
++def load_funding(cfg, times, symbols):
++    """[T, N]: sum of the funding rates settled in (Open[t], Open[t] + 4h] for each bar t. A settlement at the exact
++    Open of a bar belongs to the previous bar, so a position opened at Open[t] does not pay/receive it. Symbols with no
++    settlement file (no perp yet) get NaN, which the engine treats as 0 (spot-only coins cannot be shorted anyway)."""
++    d = os.path.join(ROOT, cfg['costs']['FUNDING_DIR'])
++    cut = dev_cut(cfg)
++    F = np.full((len(times), len(symbols)), np.nan)
++    edges = times.values
++    for k, s in enumerate(symbols):
++        p = os.path.join(d, f'{s}.csv')
++        if not os.path.exists(p):
++            continue
++        f = pd.read_csv(p, parse_dates=['Date'])
++        f = f[(f['Date'] < cut) & (f['Date'] > times[0])]
++        b = np.searchsorted(edges, f['Date'].values, side='left') - 1      # (Open[b], Open[b+1]] -> bar b
++        ok = (b >= 0) & (b < len(times))
++        F[:, k] = 0.0
++        np.add.at(F[:, k], b[ok], f['Funding_Rate'].values[ok])
++    return F
++
++
+ def load_market(cfg, root=None, symbols=None, start='2021-10-01', suffix='_4h_full.csv'):
+     """Cleaned matrices on the 4H grid [start, holdout cut). `symbols` = None -> every CSV under root."""
+     root = root or cfg['universe']['data_root']
+@@ -67,4 +89,5 @@
+     med = V.rolling(30, min_periods=20).median().shift(1)         # previous days only
+     day = times.normalize()
+     q = med.reindex(med.index.union(day.unique())).ffill().reindex(day).values
+-    return Market(times, keep, O, H, L, C, q, cfg)
++    fund = load_funding(cfg, times, keep) if cfg['costs'].get('FUNDING_SIDES') else None
++    return Market(times, keep, O, H, L, C, q, cfg, fund)
+diff -ru --strip-trailing-cr -x __pycache__ -x .cache -x '*.pyc' common_eval/run_short.py common_eval/run_short.py
+--- common_eval/run_short.py	2026-10-18 17:52:41.827081100 +0700
++++ common_eval/run_short.py	2026-10-18 18:24:44.326174900 +0700
+@@ -20,8 +20,8 @@
+                  colsample_bytree=0.5, random_state=42)           # LEGACY short_v2 hyper-parameters
+ 
+ 
+-def evaluate(name, mk, o, thr, cfg, short_pnl, results):
+-    eng = Engine(mk, cfg, short_pnl=short_pnl)
++def evaluate(name, mk, o, thr, cfg, short_pnl, results, funding=True):
++    eng = Engine(mk, cfg, short_pnl=short_pnl, funding=funding)
+     sigdf = ad.to_signals(o, thr, 'short', cfg)
+     sig = Signals.from_frame(mk, sigdf)
+     rec = {'name': name, 'n_signals': sig.n, 'thr': thr, 'sig_df': sigdf, 'pool_mask': ad.pool_mask(mk, o, cfg), 'short_pnl': short_pnl}
+@@ -48,7 +48,7 @@
+     mk_bk, mk_all = load_market(cfg, root='data'), load_market(cfg)
+     results = {}
+     o_bk = ad.read_oof(os.path.join(ROOT, 'data/model/short_v2/entry_oof.parquet'))
+-    evaluate('S0_AS_IS (reciprocal P&L)', mk_bk, o_bk, thr, cfg, 'legacy_reciprocal', results)
++    evaluate('S0_AS_IS (reciprocal P&L)', mk_bk, o_bk, thr, cfg, 'legacy_reciprocal', results, funding=False)  # as-is: no funding
+     evaluate('S1_+H3 true short P&L', mk_bk, o_bk, thr, cfg, 'true', results)
+     panel = wf.load_panel(os.path.join(ROOT, 'data_all/model/entry_panel_univ_short.parquet'), cfg)
+     feats_all = [c for c in panel.columns if c not in wf.NON_FEAT]
+--- config.yaml	2026-10-18 18:21:42.976403700 +0700
++++ config.yaml	2026-10-18 18:24:44.326174900 +0700
+@@ -7,6 +7,8 @@
+   SLIPPAGE_BASE: 0.002           # (given) per side, applied when liquidity is >= SLIP_REF_QV
+   SLIP_REF_QV: 10000000          # (assumed) 30d median daily quote volume at/above which slippage = base
+   SLIP_MAX_MULT: 5               # (assumed) slippage = base * clip(sqrt(SLIP_REF_QV / qv30), 1, SLIP_MAX_MULT)
++  FUNDING_SIDES: [short]         # (given 2026-10-18) funding is charged/credited on these sides (UP is spot -> none)
++  FUNDING_DIR: data_funding      # raw settlement events <SYM>.csv (Date, Funding_Rate), development period only
+ 
+ universe:
+   MIN_QUOTE_VOL_30D: 500000      # (given) median daily quote volume of the previous 30 days, lagged 1 day
+--- /dev/null	2026-10-18 18:25:01.000000000 +0700
++++ tests/test_funding.py	2026-10-18 18:24:59.491713400 +0700
+@@ -0,0 +1,55 @@
++"""Funding sign tests for the proposed common_eval change (spec section 9)."""
++import copy
++import os
++import sys
++
++import numpy as np
++import pytest
++
++HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, HERE)
++import yaml
++from common_eval.backtest import Engine
++
++CFG = yaml.safe_load(open(os.path.join(HERE, 'config.yaml'), encoding='utf-8'))
++
++
++class MK:
++    def __init__(self, fund, price=100.0):
++        T = len(fund)
++        self.O = np.full((T, 1), price); self.H = self.O; self.L = self.O; self.C = np.full((T, 1), price)
++        self.fund = np.array(fund, float).reshape(-1, 1)
++        self.T, self.N = T, 1
++
++
++def test_short_receives_positive_funding_and_pays_negative():
++    e = Engine(MK([0.001, 0.001, -0.0005]), copy.deepcopy(CFG))
++    fp = e.funding_path(-1, 0, 0, 2, 'TIME')
++    assert fp == pytest.approx([0.001, 0.002, 0.0015])
++
++
++def test_long_is_not_charged_when_only_short_is_configured():
++    e = Engine(MK([0.001, 0.001, 0.001]), copy.deepcopy(CFG))
++    assert e.funding_path(1, 0, 0, 2, 'TIME') is None
++
++
++def test_long_pays_positive_funding_if_enabled():
++    c = copy.deepcopy(CFG); c['costs']['FUNDING_SIDES'] = ['long', 'short']
++    e = Engine(MK([0.001, 0.001, 0.001]), c)
++    assert e.funding_path(1, 0, 0, 2, 'TIME')[-1] == pytest.approx(-0.003)
++
++
++def test_stop_exit_skips_settlement_of_exit_bar():
++    e = Engine(MK([0.001, 0.001, 0.001]), copy.deepcopy(CFG))
++    assert e.funding_path(-1, 0, 0, 2, 'TRAIL')[-1] == pytest.approx(0.002)
++
++
++def test_funding_scales_with_price():
++    mk = MK([0.001, 0.001]); mk.C = np.array([[100.0], [50.0]])
++    e = Engine(mk, copy.deepcopy(CFG))
++    assert e.funding_path(-1, 0, 0, 1, 'TIME')[-1] == pytest.approx(0.001 + 0.001 * 0.5)
++
++
++def test_engine_off_switch_for_as_is_runs():
++    e = Engine(MK([0.001]), copy.deepcopy(CFG), funding=False)
++    assert e.funding_path(-1, 0, 0, 0, 'TIME') is None

@@ -45,7 +45,24 @@ random:
 model:
   xgb: {n_estimators: 300, learning_rate: 0.03, max_depth: 4, min_child_weight: 1.0, subsample: 0.8, colsample_bytree: 0.8, random_state: 42}
 
-new:                              # placeholders - filled when NEW exists
-  feature_set: null
-  model_params: null
-  label: null
+new:                              # NEW-only keys (prompts/new_research.md). Existing keys above are unchanged.
+  feature_set: section6_v1        # new_research/features.py + panel.py (cross-sectional) + 2 regime variables
+  label:
+    UP_TARGET: 2.0                # spec section 4
+    DOWN_TARGET: 0.5
+    MAE_LIMIT: 0.25
+    EVENT_COOLDOWN: 180           # bars (30 days) between runs of the same coin
+  regime_macro: [btc_trend, netliq]   # filters/reporting only, never model inputs (spec section 1). UP filter = btc_trend.
+                                      # HY_SPREAD dropped: FRED only serves it from 2023-10-17 (would be a time flag)
+  model_params:
+    xgb: {max_depth: 3, min_child_weight: 200, subsample: 0.7, colsample_bytree: 0.7, learning_rate: 0.03,
+          n_estimators: 2000, early_stopping_rounds: 100, random_state: 42}
+    logistic: {C: 0.1, max_iter: 2000}
+    VALID_FRAC: 0.2               # last 20% of each fold's training period (time-ordered, purged) = early-stopping set
+  MIN_EVENTS_PER_FOLD: 10
+  SIGNAL_TOP_FRAC: 0.01           # a coin-day is a signal if its score >= the (1 - frac) quantile of the fold's validation scores
+  BTC_TREND_MIN: 0.0              # UP regime filter: BTCUSDT close / EMA1200 - 1 > this
+  exits:                          # NEW 'native' exits mirror the NEW labels (passed to common_eval as an in-memory override)
+    native_up:   {TP: 1.00, SL: 0.25, H_BARS: 540}    # +100% target / -25% MAE / 90d
+    native_down: {TP: 1.00, SL: 0.20, H_BARS: 540}    # common_eval short barriers: price x0.5 / price x1.25 / 90d
+  precision_at_k_per_week: [5, 10, 20]
