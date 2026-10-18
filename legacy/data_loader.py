@@ -1,0 +1,207 @@
+"""
+data_loader.py — Centralized Data Fetching (100% Automated, No Hardcoding)
+"""
+import os
+import time
+import pandas as pd
+import numpy as np
+import requests
+import yfinance as yf
+from pandas_datareader import data as web
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class DataLoader:
+    # Days from FRED's observation date to its public release (conservative).
+    FRED_LAG_DAYS = {
+        "FEDFUNDS": 35,       # monthly avg, released 1st business day of next month
+        "M2": 60,             # monthly, released ~4 weeks after month end
+        "CPI": 45,            # monthly, released ~10-15th of next month
+        "FED_BAL": 2,         # weekly as of Wednesday, released Thursday
+        "RRP": 1,             # daily, released same afternoon
+        "INFLATION_10Y": 1,   # daily, end of day
+        "HY_SPREAD": 2,       # daily, ICE BofA posts with a 1-day delay
+    }
+
+    def __init__(self, csv_path, symbol):
+        self.csv_path = csv_path
+        self.symbol = symbol
+
+    def load_base_data(self):
+        print(f"[DataLoader] Loading base OHLCV from {self.csv_path} ...")
+        df = pd.read_csv(self.csv_path)
+        df['Date'] = pd.to_datetime(df['Date'])
+        df = df.sort_values('Date').reset_index(drop=True)
+        print(f"  -> {len(df)} rows, range {df['Date'].min()} ~ {df['Date'].max()}")
+        return df
+
+    def fetch_macro_data(self, start_date, end_date):
+        print("[DataLoader] Fetching Macro data (yfinance + FRED) ...")
+        tickers = {
+            "DXY":    "DX-Y.NYB",
+            "VIX":    "^VIX",
+            "SP500":  "^GSPC",
+            "BTC":    "BTC-USD",
+            "USDJPY": "JPY=X",
+            "GOLD":   "GC=F",
+            "US10Y":  "^TNX",
+            "US2Y":   "^IRX",
+            "OIL":    "CL=F",
+            "COPPER": "HG=F",
+        }
+
+        macro_df = pd.DataFrame(index=pd.date_range(start=start_date, end=end_date))
+        macro_df.index.name = 'Date'
+
+        for name, ticker in tickers.items():
+            try:
+                data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+                if not data.empty:
+                    close = data['Close'].squeeze()
+                    idx = pd.to_datetime(close.index)
+                    idx = idx.tz_localize(None) if idx.tz is not None else idx
+                    # N-1: day D's close is stamped D 00:00 but only known after the
+                    # US session (~21:00 UTC) -> make it available from D+1 00:00.
+                    close.index = idx.normalize() + pd.Timedelta(days=1)
+                    macro_df[f"{name}_Close"] = close[~close.index.duplicated(keep='last')]
+                    print(f"  -> {name}: OK ({len(data)} rows)")
+            except Exception as e:
+                print(f"  -> {name}: FAILED ({e})")
+
+        fred_tickers = {
+            "FEDFUNDS": "FEDFUNDS",
+            "M2": "M2SL",
+            "FED_BAL": "WALCL",
+            "RRP": "RRPONTSYD",
+            "INFLATION_10Y": "T10YIE",
+            "HY_SPREAD": "BAMLH0A0HYM2",
+            "CPI": "CPIAUCSL"
+        }
+
+        try:
+            # fetch extra history so the lagged series already cover start_date
+            fred_start = pd.to_datetime(start_date) - pd.Timedelta(days=120)
+            fred_data = web.DataReader(list(fred_tickers.values()), "fred", fred_start, end_date)
+            fred_data.index = pd.to_datetime(fred_data.index)
+            # rename columns to readable names
+            inv_map = {v: k for k, v in fred_tickers.items()}
+            fred_data.rename(columns=inv_map, inplace=True)
+            # Publication lag (AGENTS.md Rule 2): FRED stamps an observation at the
+            # START of its period; shift each series to its real release date.
+            lagged = []
+            for col in fred_data.columns:
+                sr = fred_data[col].dropna()
+                sr.index = sr.index + pd.Timedelta(days=self.FRED_LAG_DAYS.get(col, 45))
+                lagged.append(sr)
+            fred_data = pd.concat(lagged, axis=1)
+            macro_df = macro_df.join(fred_data, how="outer")
+            print(f"  -> FRED Data: OK ({list(fred_tickers.keys())})")
+        except Exception as e:
+            print(f"  -> FRED Data: FAILED ({e})")
+
+        # Fill forward missing days (e.g. weekends for daily, or rest of month for monthly)
+        macro_df = macro_df.ffill().fillna(0)
+
+        # Smooth out step functions from FRED data using SMA 50 and PctChange
+        for col in fred_tickers.keys():
+            if col in macro_df.columns:
+                macro_df[f"{col}_SMA50"] = macro_df[col].rolling(window=50, min_periods=1).mean()
+                # Use np.replace to handle division by zero (inf) which breaks XGBoost
+                macro_df[f"{col}_PctChg"] = macro_df[col].pct_change().replace([np.inf, -np.inf], 0).fillna(0)
+
+        return macro_df
+
+    def fetch_fear_greed(self, start_date, end_date):
+        print("[DataLoader] Fetching Fear & Greed Index (Alternative.me) ...")
+        try:
+            days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1
+            url = f"https://api.alternative.me/fng/?limit={days}&format=json"
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+
+            if not data:
+                return None
+
+            rows = [
+                {"Date": pd.to_datetime(int(d["timestamp"]), unit="s"), "FearGreed": int(d["value"])}
+                for d in data
+            ]
+            fg_df = pd.DataFrame(rows).sort_values("Date").set_index("Date")
+            print(f"  -> Fear & Greed: OK ({len(fg_df)} rows)")
+            return fg_df
+        except Exception as e:
+            print(f"  -> Fear & Greed: FAILED ({e})")
+            return None
+
+    def fetch_funding_rate(self, start_date=None, end_date=None):
+        print(f"[DataLoader] Fetching Binance Funding Rate ({self.symbol}) ...")
+        try:
+            all_data = []
+            start_ms = int(pd.to_datetime(start_date).timestamp() * 1000) if start_date else 0
+
+            for _ in range(50):
+                url = (
+                    f"https://fapi.binance.com/fapi/v1/fundingRate"
+                    f"?symbol={self.symbol}&limit=1000&startTime={start_ms}"
+                )
+                resp = requests.get(url, timeout=15)
+                resp.raise_for_status()
+                batch = resp.json()
+                if not batch:
+                    break
+                all_data.extend(batch)
+                start_ms = batch[-1]["fundingTime"] + 1
+                time.sleep(0.15)
+                if len(batch) < 1000:
+                    break
+
+            if not all_data:
+                return None
+
+            fr_df = pd.DataFrame(all_data)
+            fr_df['Date'] = pd.to_datetime(fr_df['fundingTime'], unit='ms')
+            fr_df['FundingRate'] = fr_df['fundingRate'].astype(float)
+            fr_df = fr_df[['Date', 'FundingRate']].sort_values('Date')
+
+            # Mean of the funding prints in [D 00:00, D+1 00:00), stamped at D+1 00:00
+            # when the last of them is known (a left label would leak day D's funding).
+            fr_daily = fr_df.set_index('Date').resample('1D', label='right', closed='left').mean()
+            print(f"  -> Funding Rate: OK ({len(fr_daily)} daily rows)")
+            return fr_daily
+        except Exception as e:
+            print(f"  -> Funding Rate: FAILED ({e})")
+            return None
+
+    def get_full_data(self):
+        df = self.load_base_data()
+        # merge_asof requires identical datetime resolution on both keys. Sources
+        # arrive with mixed units (us / s), so normalize every key to ns.
+        df['Date'] = pd.to_datetime(df['Date']).astype('datetime64[ns]')
+        start_date = df['Date'].min().strftime("%Y-%m-%d")
+        end_date = df['Date'].max().strftime("%Y-%m-%d")
+
+        macro_df = self.fetch_macro_data(start_date, end_date)
+        if macro_df is not None:
+            macro_df.index.name = 'Date'
+            macro_reset = macro_df.reset_index()
+            macro_reset['Date'] = pd.to_datetime(macro_reset['Date']).astype('datetime64[ns]')
+            df = pd.merge_asof(df, macro_reset, on='Date', direction='backward')
+
+        fg_df = self.fetch_fear_greed(start_date, end_date)
+        if fg_df is not None:
+            fg_reset = fg_df.reset_index()
+            fg_reset['Date'] = pd.to_datetime(fg_reset['Date']).astype('datetime64[ns]')
+            df = pd.merge_asof(df, fg_reset, on='Date', direction='backward')
+
+        fr_df = self.fetch_funding_rate(start_date, end_date)
+        if fr_df is not None:
+            fr_reset = fr_df.reset_index()
+            fr_reset['Date'] = pd.to_datetime(fr_reset['Date']).astype('datetime64[ns]')
+            df = pd.merge_asof(df, fr_reset, on='Date', direction='backward')
+
+        df = df.ffill().fillna(0)
+        print(f"[DataLoader] Final dataset: {df.shape[0]} rows x {df.shape[1]} columns")
+        return df
