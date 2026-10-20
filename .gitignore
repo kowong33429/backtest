@@ -14,7 +14,12 @@ venv/
 *.csv
 *.parquet
 data/
+data_all/
 
+# Caches / generated artifacts (pickles, trained models, test reports)
+.cache/
+*.pkl
+junit*.xml
 
 # IDE
 .vscode/
